@@ -1593,6 +1593,7 @@ public class FuzzSMT {
       builder.append (" ");
       builder.append (a2.getName());
       builder.append (")"+oneBit() +" " +zeroBit());
+      builder.append (")");
       builder.append (letClose());
       bvs.add (new SMTNode (new BVType (1), name));
     }
