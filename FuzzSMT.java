@@ -23,6 +23,16 @@ import java.math.*;
 public class FuzzSMT {
 
 	static boolean smtlib1; // if true output in smtlib1 format.
+	static boolean noOverflow = false; // if true, do not emit bv overflow predicates.
+	static int maxNary = 3; // max arity for left-assoc bv ops (bvand/bvor/bvadd/bvmul/bvxor); 2 = binary only.
+
+  /* distinct over three or more Booleans is trivially false by pigeonhole, so
+   * an n-ary Boolean distinct is only emitted with probability
+   * 1/naryDistinctOdds; otherwise the binary form is used.  Deliberately set
+   * very high: the n-ary form remains reachable, so the parser path is still
+   * covered over a long fuzzing run, but it is rare enough that it is
+   * effectively absent from any single batch of instances. */
+  private static final int naryDistinctOdds = 32000;
 	static String bulkPrefix =""; // Prepend to bulk output. 	
 	static java.io.PrintStream output; // where output is written to.
 		
@@ -1056,6 +1066,10 @@ public class FuzzSMT {
       kindSet.remove (SMTNodeKind.BVSREM);
       kindSet.remove (SMTNodeKind.BVSMOD);
     }
+    /* overflow predicates only exist in SMT-LIB 2 and can be disabled */
+    if (smtlib1 || noOverflow)
+      kindSet.removeAll (EnumSet.range (SMTNodeKind.BVUADDO,
+                                        SMTNodeKind.BVSDIVO));
     if (!uFuncs.isEmpty())
       kindSet.add (SMTNodeKind.UFUNC);
     if (!uPreds.isEmpty())
@@ -1197,6 +1211,37 @@ public class FuzzSMT {
           updateNodeRefs (todoNodes, n1, minRefs);
           break;
         case 2:
+          /* left-associative operators (bvand bvor bvadd bvmul bvxor) may be
+           * emitted as n-ary applications when -nary raises maxNary above 2,
+           * exercising the left-assoc parser path.  All operands and the
+           * result share one bit-width, so no blowup beyond maxBW occurs. */
+          if (!smtlib1 && maxNary > 2 &&
+              (kind == SMTNodeKind.BVAND || kind == SMTNodeKind.BVOR ||
+               kind == SMTNodeKind.BVADD || kind == SMTNodeKind.BVMUL ||
+               kind == SMTNodeKind.BVXOR)) {
+            int nary = 2 + r.nextInt (maxNary - 1); /* 2 .. maxNary */
+            if (nary > 2) {
+              SMTNode []naryNodes = new SMTNode[nary];
+              int naryBW = n1BW;
+              naryNodes[0] = n1;
+              for (int j = 1; j < nary; j++) {
+                SMTNode nn = nodes.get(r.nextInt(nodes.size()));
+                assert (nn.getType() instanceof BVType);
+                naryNodes[j] = nn;
+                int nnBW = ((BVType) nn.getType()).width;
+                if (nnBW > naryBW)
+                  naryBW = nnBW;
+              }
+              builder.append (kind.getString(smtlib1));
+              for (int j = 0; j < nary; j++) {
+                builder.append (" ");
+                builder.append (adaptBW (r, naryNodes[j], naryBW));
+                updateNodeRefs (todoNodes, naryNodes[j], minRefs);
+              }
+              resBW = naryBW;
+              break;
+            }
+          }
           n2 = nodes.get(r.nextInt(nodes.size()));
           assert (n2.getType() instanceof BVType);
           n2BW = ((BVType) n2.getType()).width;
@@ -1218,6 +1263,13 @@ public class FuzzSMT {
             case BVSLE:
             case BVSGT:
             case BVSGE:
+            case BVUADDO:
+            case BVSADDO:
+            case BVUSUBO:
+            case BVSSUBO:
+            case BVUMULO:
+            case BVSMULO:
+            case BVSDIVO:
             case EQ:
               /* encode boolean results into bit-vector */
               builder.append ("ite (");
@@ -2296,9 +2348,16 @@ public class FuzzSMT {
     assert (!bvNodes.isEmpty());
     assert (boolNodes != null);
     assert (minRefs > 0);
-    assert (SMTNodeKind.BVULT.ordinal() < SMTNodeKind.BVSGE.ordinal());
+    assert (SMTNodeKind.BVULT.ordinal() < SMTNodeKind.BVSDIVO.ordinal());
 
-    kindSet = EnumSet.range (SMTNodeKind.BVULT, SMTNodeKind.BVSGE);
+    /* BVULT..BVSDIVO covers the comparison and binary overflow predicates */
+    kindSet = EnumSet.range (SMTNodeKind.BVULT, SMTNodeKind.BVSDIVO);
+    /* overflow predicates only exist in SMT-LIB 2 and can be disabled */
+    if (smtlib1 || noOverflow)
+      kindSet.removeAll (EnumSet.range (SMTNodeKind.BVUADDO,
+                                        SMTNodeKind.BVSDIVO));
+    else
+      kindSet.add (SMTNodeKind.BVNEGO); /* unary overflow predicate */
     kindSet.add (SMTNodeKind.EQ);
     kindSet.add (SMTNodeKind.DISTINCT);
     if (!uPreds.isEmpty())
@@ -2326,10 +2385,18 @@ public class FuzzSMT {
        * if todo list ist not empty */
       if (!todoUPreds.isEmpty() && r.nextBoolean())
         kind = SMTNodeKind.UPRED;
-      else 
+      else
         kind = kinds[r.nextInt (kinds.length)];
-      assert (kind.arity == 2 || kind.arity == -1);
-      if (kind == SMTNodeKind.UPRED) {
+      assert (kind.arity == 1 || kind.arity == 2 || kind.arity == -1);
+      if (kind == SMTNodeKind.BVNEGO) {
+        /* unary overflow predicate: bv -> Bool */
+        n1 = bvNodes.get(r.nextInt(sizeBVNodes));
+        assert (n1.getType() instanceof BVType);
+        builder.append (kind.getString(smtlib1));
+        builder.append (" ");
+        builder.append (n1.getName());
+        updateNodeRefs (todoNodes, n1, minRefs);
+      } else if (kind == SMTNodeKind.UPRED) {
         if (!todoUPreds.isEmpty() && r.nextBoolean()) {
           todoUPredsArray = todoUPreds.keySet().toArray (new UPred[0]);
           uPred = todoUPredsArray[r.nextInt(todoUPredsArray.length)];
@@ -2790,6 +2857,7 @@ public class FuzzSMT {
   private static int generateBooleanLayer (Random r, List<SMTNode> nodes){
     int generated = 0;
     SMTNode n1, n2, n3;
+    List<SMTNode> extraOps;
     SMTNodeKind [] kinds;
     SMTNodeKind [] kindsNoIfThenElse;
     SMTNodeKind kind;
@@ -2803,9 +2871,18 @@ public class FuzzSMT {
 
     kindSet = EnumSet.range (SMTNodeKind.AND, SMTNodeKind.IFF);
     kindSet.add (SMTNodeKind.NOT);
+    /* distinct over two booleans; handled by the binary default case */
+    kindSet.add (SMTNodeKind.DISTINCT);
     kindsNoIfThenElse = kindSet.toArray(new SMTNodeKind[0]);
     kindSet.add (SMTNodeKind.IF_THEN_ELSE);
     kinds = kindSet.toArray(new SMTNodeKind[0]);
+
+    /* seed the operand pool with the boolean constants true and false so
+     * they get combined by random connectives (and are thus generated). */
+    nodes.add (new SMTNode (BoolType.boolType,
+                            SMTNodeKind.TRUE.getString(smtlib1)));
+    nodes.add (new SMTNode (BoolType.boolType,
+                            SMTNodeKind.FALSE.getString(smtlib1)));
 
     builder = new StringBuilder();
     while (nodes.size() > 1){
@@ -2817,6 +2894,7 @@ public class FuzzSMT {
       assert (n1.getType() == BoolType.boolType);
 
       n2 = n3 = null;
+      extraOps = null;
       if (nodes.size() >= 3)
         kind = kinds[r.nextInt(kinds.length)];
       else
@@ -2842,7 +2920,9 @@ public class FuzzSMT {
           builder.append (n3.getName());
           break;
       default:
-        /* binary operators */
+        /* variadic core operators (and or xor => = distinct): emit 2..maxNary
+         * Bool operands, reusing -nary.  n2 is the second operand; any further
+         * operands are tracked in extraOps so they get removed from the pool. */
         n2 = nodes.get(r.nextInt(nodes.size()));
         assert (n2.getType() == BoolType.boolType);
         builder.append (kind.getString(smtlib1));
@@ -2850,6 +2930,20 @@ public class FuzzSMT {
         builder.append (n1.getName());
         builder.append (" ");
         builder.append (n2.getName());
+        if (!smtlib1 && maxNary > 2 &&
+            (kind != SMTNodeKind.DISTINCT ||
+             r.nextInt (naryDistinctOdds) == 0)) {
+          int bnary = 2 + r.nextInt(maxNary - 1); /* 2 .. maxNary */
+          for (int j = 2; j < bnary; j++) {
+            SMTNode nb = nodes.get(r.nextInt(nodes.size()));
+            assert (nb.getType() == BoolType.boolType);
+            builder.append (" ");
+            builder.append (nb.getName());
+            if (extraOps == null)
+              extraOps = new ArrayList<SMTNode>();
+            extraOps.add (nb);
+          }
+        }
         break;
       }
       builder.append (")");
@@ -2861,6 +2955,9 @@ public class FuzzSMT {
         nodes.remove (n2);
       if (n3 != null)
         nodes.remove (n3);
+      if (extraOps != null)
+        for (int j = 0; j < extraOps.size(); j++)
+          nodes.remove (extraOps.get(j));
     }
     output.print (builder.toString());
 
@@ -3108,6 +3205,7 @@ public class FuzzSMT {
     SMTNodeKind []kindsBoolNoIfThenElse;
     SMTNodeKind kind;
     String name, s1, s2, s3;
+    List<String> extraNames;
     String []qVarNamesArray;
     String []boolNamesArray;
     HashMap<String, Integer> todoQVarNames; 
@@ -3249,6 +3347,7 @@ public class FuzzSMT {
         builder.append (" (");
         s1 = boolNamesArray[r.nextInt(boolNamesArray.length)];
         s2 = s3 = null;
+        extraNames = null;
         if (boolNames.size() >= 3)
           kind = kindsBool[r.nextInt(kindsBool.length)];
         else
@@ -3272,13 +3371,26 @@ public class FuzzSMT {
             builder.append (s3);
             break;
         default:
-          /* binary operators */
+          /* variadic core operators (and or xor => = distinct): emit
+           * 2..maxNary Bool operands, reusing -nary.  Extra operands beyond
+           * s2 are tracked in extraNames so they get removed from the pool. */
           s2 = boolNamesArray[r.nextInt(boolNamesArray.length)];
           builder.append (kind.getString(smtlib1));
           builder.append (" ");
           builder.append (s1);
           builder.append (" ");
           builder.append (s2);
+          if (!smtlib1 && maxNary > 2) {
+            int bnary = 2 + r.nextInt(maxNary - 1); /* 2 .. maxNary */
+            for (int j = 2; j < bnary; j++) {
+              String sb = boolNamesArray[r.nextInt(boolNamesArray.length)];
+              builder.append (" ");
+              builder.append (sb);
+              if (extraNames == null)
+                extraNames = new ArrayList<String>();
+              extraNames.add (sb);
+            }
+          }
           break;
         }
         builder.append (")");
@@ -3290,6 +3402,9 @@ public class FuzzSMT {
           boolNames.remove (s2);
         if (s3 != null)
           boolNames.remove (s3);
+        if (extraNames != null)
+          for (int j = 0; j < extraNames.size(); j++)
+            boolNames.remove (extraNames.get(j));
         pars++;
       }
       assert (boolNames.size() == 1);
@@ -3413,11 +3528,11 @@ public class FuzzSMT {
 
 
 
-  private static final String version = "0.3";
+  private static final String version = "0.32";
 
   private static final String usage = 
 "********************************************************************************\n" +
-"*              FuzzSMT " + version + "                                                     *\n"  +
+"*              FuzzSMT " + version + "                                                    *\n"  +
 "*              Fuzzing Tool for SMT-LIB 2.0 & SMT-LIB 1.2 Benchmarks           *\n" +
 "*              written by Robert Daniel Brummayer, 2009                        *\n" + 
 "********************************************************************************\n" +
@@ -3481,6 +3596,9 @@ public class FuzzSMT {
 "  -Ma <args>           set max number of arguments to <args>  (default  3)\n" +
 "  -g                   do not guard BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n"+
 "  -n                   do not use BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n" +
+"  -no-overflow         do not use bv overflow predicates (bvuaddo etc.)\n" +
+"  -nary <n>            emit bvand bvor bvadd bvmul bvxor with up to <n>\n" +
+"                       arguments (left-assoc; default  3; 2 = binary only)\n" +
 "  -ref <refs>          set min number of references for terms\n" + 
 "                       in input and main layer to <refs>      (default  1)\n" +
 "\n" +
@@ -3503,6 +3621,9 @@ public class FuzzSMT {
 "  -Ma <args>           set max number of arguments to <args>  (default  3)\n" +
 "  -g                   do not guard BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n"+
 "  -n                   do not use BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n" +
+"  -no-overflow         do not use bv overflow predicates (bvuaddo etc.)\n" +
+"  -nary <n>            emit bvand bvor bvadd bvmul bvxor with up to <n>\n" +
+"                       arguments (left-assoc; default  3; 2 = binary only)\n" +
 "  -ref <refs>          set min number of references for terms\n" + 
 "                       in input and main layer to <refs>      (default  1)\n" +
 "\n" +
@@ -3631,6 +3752,9 @@ public class FuzzSMT {
 "  -Mbw <bw>            set max bit-width to <bw>              (default 16)\n" +
 "  -g                   do not guard BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n"+
 "  -n                   do not use BVUDIV BVSDIV BVUREM BVSREM BVSMOD\n" +
+"  -no-overflow         do not use bv overflow predicates (bvuaddo etc.)\n" +
+"  -nary <n>            emit bvand bvor bvadd bvmul bvxor with up to <n>\n" +
+"                       arguments (left-assoc; default  3; 2 = binary only)\n" +
 "  -ref <refs>          set min number of references for terms\n" +
 "                       in input and main layer to <refs>      (default  1)\n" +
 "  QF_UFBV only:\n" +
@@ -4091,6 +4215,10 @@ public class FuzzSMT {
           bvDivMode = BVDivMode.FULL;
         } else if (arg.equals("-n")) {
           bvDivMode = BVDivMode.OFF;
+        } else if (arg.equals("-no-overflow")) {
+          noOverflow = true;
+        } else if (arg.equals("-nary")) {
+          maxNary = parseIntOption (args, i++, 2, "invalid maximum n-ary arity");
         } else if (arg.equals("-x")) {
           compModeArray = RelCompMode.EQ;
         } else if (arg.equals("-x1")) {
