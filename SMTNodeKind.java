@@ -63,6 +63,17 @@ public enum SMTNodeKind {
   BVSLE("bvsle", 2),
   BVSGT("bvsgt", 2),
   BVSGE("bvsge", 2),
+  /* overflow-detection predicates (SMT-LIB 2 FixedSizeBitVectors).
+   * Binary, take two bit-vectors of equal width and return Bool.
+   * Keep these contiguous, immediately after BVSGE: the BV term and
+   * predicate layers select them via EnumSet.range(BVULT, BVSDIVO). */
+  BVUADDO("bvuaddo", 2),
+  BVSADDO("bvsaddo", 2),
+  BVUSUBO("bvusubo", 2),
+  BVSSUBO("bvssubo", 2),
+  BVUMULO("bvumulo", 2),
+  BVSMULO("bvsmulo", 2),
+  BVSDIVO("bvsdivo", 2),
   BVSHL("bvshl", 2),
   BVLSHR("bvlshr", 2),
   BVASHR("bvashr", 2),
@@ -73,6 +84,10 @@ public enum SMTNodeKind {
   BVSREM("bvsrem", 2),
   BVSMOD("bvsmod", 2),
   CONCAT("concat", 2),
+  /* unary overflow-detection predicate (SMT-LIB 2): (_ BitVec m) -> Bool.
+   * Kept outside the BVNOT..CONCAT term range on purpose so it is only
+   * emitted at the Boolean/predicate layer, not wrapped as a BV term. */
+  BVNEGO("bvnego", 1),
   /* interpreted predicates */
   LT("<", 2),
   GT(">", 2),

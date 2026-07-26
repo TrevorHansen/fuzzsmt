@@ -86,6 +86,34 @@ Changes in 0.3
   [0,2 + bitwidth), previously it was in [0, bitwidth). This generates instances
   that rely on the modulo-bitwidth behaviour of rotate left/right.
 
+Changes in 0.32
+--------------
+* The SMT-LIB 2 bit-vector overflow-detection predicates are now generated for
+  the bit-vector logics (QF_BV, QF_ABV, QF_AUFBV, QF_UFBV):
+  bvnego, bvuaddo, bvsaddo, bvusubo, bvssubo, bvumulo, bvsmulo, bvsdivo.
+  These are SMT-LIB 2 only, so they are never emitted in -smtlib1 mode.
+  Use -no-overflow to suppress them (e.g. when targeting a solver that does
+  not yet support them).
+* Operators that SMT-LIB 2 declares left-associative or variadic are now
+  emitted with a random number of arguments between 2 and the -nary limit,
+  rather than always exactly two. This applies to the bit-vector operators
+  bvand, bvor, bvadd, bvmul and bvxor, and to the core Boolean operators
+  and, or, xor, =>, = and distinct. It exercises solver parser paths that
+  binary-only output never reaches.
+  NOTE: the default limit is 3, so the default output of 0.32 differs from
+  0.3 even with no new options given. Pass -nary 2 to restore the previous
+  binary-only behaviour. Like the overflow predicates, this is SMT-LIB 2
+  only and never affects -smtlib1 output.
+* The Boolean layer now seeds its operand pool with the constants true and
+  false, so they appear in generated instances instead of never being used.
+* This lifts the "no distincts with greater than 2 operands" limitation
+  listed for 0.31 below: distinct now appears in the Boolean layer and is
+  sometimes generated with more than two operands. Because distinct over
+  three or more Booleans is trivially false by pigeonhole, the n-ary form is
+  deliberately made very rare (well under one occurrence in ten thousand
+  generated instances): it stays reachable, so a long fuzzing run still
+  covers the n-ary parser path, but in practice distinct is binary.
+
 Changes in 0.31
 --------------
 * The version number has been changed.
