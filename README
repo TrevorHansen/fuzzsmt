@@ -150,14 +150,16 @@ Changes in 0.33
   partial conversions are deliberately left unguarded, so NaN, the
   infinities and out-of-range values do reach them. -mconv/-Mconv set how
   many conversions are generated per direction.
-* fp.div, fp.rem and fp.fma are not generated for sorts wider than Float64,
-  i.e. for Float128 and for anything at least as wide drawn by -fp-any. On
-  those sorts they bit-blast into circuits that solvers do not get through,
-  and a timed out instance tells a fuzzing run nothing. Measured over 50
-  QF_FP instances with z3 5.0.0 and a ten second limit, leaving them out
-  takes the timeouts from 10 to 6 and the median solving time from 520ms to
-  74ms. Pass -fp-wide-ops to generate them anyway. All the other operators
-  are generated on every sort.
+* fp.div, fp.rem, fp.fma and fp.sqrt are not generated for sorts wider than
+  Float64, i.e. for Float128 and for anything at least as wide drawn by
+  -fp-any. On those sorts they bit-blast into circuits that solvers do not
+  get through, and a timed out instance tells a fuzzing run nothing.
+  Measured over 50 QF_FP instances with z3 5.0.0 and a ten second limit,
+  leaving them out takes the timeouts from 10 to 6, the median solving time
+  from 520ms to 103ms and the third quartile from 6.1s to 1.1s. Pass
+  -fp-wide-ops to generate them anyway. All the other operators are
+  generated on every sort, and all four are still generated on Float16,
+  Float32 and Float64.
 * Floating point exists only in SMT-LIB 2, so -smtlib1 together with any of
   the floating point logics is rejected rather than silently ignored.
 

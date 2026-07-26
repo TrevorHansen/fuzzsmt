@@ -2481,12 +2481,13 @@ public class FuzzSMT {
     return fpRoundingModeKinds.contains (kind);
   }
 
-  /* Sorts wider than Float64.  fp.div, fp.rem and fp.fma on these are where
-   * the solvers fall over: they bit-blast into circuits that neither z3 nor
-   * bitwuzla finishes in ten seconds, while the same operators on Float32
-   * are milliseconds.  Since a timed out instance tells a fuzzing run
-   * nothing, the three are left out for such sorts unless -fp-wide-ops asks
-   * for them.  Every other operator, and every sort, is unaffected. */
+  /* Sorts wider than Float64.  fp.div, fp.rem, fp.fma and fp.sqrt on these
+   * are where the solvers fall over: they bit-blast into circuits that
+   * neither z3 nor bitwuzla finishes in ten seconds, while the same
+   * operators on Float32 are milliseconds.  Since a timed out instance
+   * tells a fuzzing run nothing, the four are left out for such sorts
+   * unless -fp-wide-ops asks for them.  Every other operator, and every
+   * sort, is unaffected. */
   private static boolean fpWideSort (FPType type){
     assert (type != null);
 
@@ -2745,6 +2746,7 @@ public class FuzzSMT {
     kindSet.remove (SMTNodeKind.FP_DIV);
     kindSet.remove (SMTNodeKind.FP_REM);
     kindSet.remove (SMTNodeKind.FP_FMA);
+    kindSet.remove (SMTNodeKind.FP_SQRT);
     narrowKinds = kindSet.toArray (new SMTNodeKind[0]);
 
     oldSize = nodes.size();
@@ -4440,9 +4442,10 @@ public class FuzzSMT {
 "  -Mvrm <vars>         use max <vars> RoundingMode variables  (default  2)\n" +
 "  -fp-any              draw arbitrary (eb,sb) sorts instead of only\n" +
 "                       Float16, Float32, Float64 and Float128\n" +
-"  -fp-wide-ops         also emit fp.div, fp.rem and fp.fma on sorts wider\n" +
-"                       than Float64.  Off by default: on Float128 they are\n" +
-"                       what makes instances time out rather than solve\n" +
+"  -fp-wide-ops         also emit fp.div, fp.rem, fp.fma and fp.sqrt on\n" +
+"                       sorts wider than Float64.  Off by default: on\n" +
+"                       Float128 they are what makes instances time out\n" +
+"                       rather than solve\n" +
 "  -Mfpeb <bits>        set max exponent bits with -fp-any     (default 15)\n" +
 "  -Mfpsb <bits>        set max significand bits with -fp-any  (default 24)\n" +
 "  -nary <n>            emit the chainable comparisons and = distinct with\n" +
