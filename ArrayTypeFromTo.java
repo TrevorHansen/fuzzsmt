@@ -17,7 +17,12 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-public class ArrayTypeFromTo extends SMTType {
+/* Extends ArrayType so that the array layers, which assert that the arrays
+ * they are handed are of an ArrayType, accept these too.  ArrayType itself
+ * cannot print the SMT-LIB 2 form of the sort because it has nowhere to keep
+ * the index and element sorts, which is why this class exists.
+ */
+public class ArrayTypeFromTo extends ArrayType {
 
 		SMTType from, to;
 	
