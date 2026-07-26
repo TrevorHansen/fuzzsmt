@@ -2710,6 +2710,7 @@ public class FuzzSMT {
     SMTNodeKind []kinds;
     String name;
     HashMap<SMTNode, Integer> todoNodes;
+    SMTNode []todoNodesArray;
     SMTNode n1, n2;
     FPType curType;
     StringBuilder builder;
@@ -2738,7 +2739,17 @@ public class FuzzSMT {
       builder.append (" (");
 
       kind = kinds[r.nextInt (kinds.length)];
-      n1 = nodes.get (r.nextInt (nodes.size()));
+      /* Half of the time take the first operand from the nodes that still
+       * need a reference.  Picking uniformly from a list that grows by one
+       * every iteration makes clearing the last few entries a coupon
+       * collector problem, and its tail produces the occasional enormous
+       * instance. */
+      if (r.nextBoolean()) {
+        todoNodesArray = todoNodes.keySet().toArray (new SMTNode[0]);
+        n1 = todoNodesArray[r.nextInt (todoNodesArray.length)];
+      } else {
+        n1 = nodes.get (r.nextInt (nodes.size()));
+      }
       assert (n1.getType() instanceof FPType);
       /* the sort of the first operand is the sort of the result; every
        * other operand is converted to it */
@@ -2788,6 +2799,202 @@ public class FuzzSMT {
     return nodes.size() - oldSize;
   }
 
+  /* Is this one of the logics that contains the FloatingPoint theory? */
+  private static boolean isFPLogic (SMTLogic logic){
+    switch (logic) {
+      case QF_FP:
+      case QF_FPLRA:
+      case QF_BVFP:
+      case QF_BVFPLRA:
+      case QF_ABVFP:
+      case QF_ABVFPLRA:
+      case QF_AUFBVFP:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /* Bit-vector to floating point.  All three forms of the conversion are
+   * generated: the bit pattern reinterpretation, which takes no rounding
+   * mode and needs a bit-vector of exactly eb+sb bits, and the two rounding
+   * conversions that read the bit-vector as a signed or unsigned integer. */
+  private static int generateBVToFPLayer (Random r, List<SMTNode> bvNodes,
+                                          List<SMTNode> fpNodes,
+                                          List<SMTNode> rmNodes,
+                                          int numConversions){
+    String name;
+    FPType type;
+    SMTNode n1;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (bvNodes != null);
+    assert (!bvNodes.isEmpty());
+    assert (fpNodes != null);
+    assert (numConversions >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numConversions; i++) {
+      type = selectFPSort (r);
+      name = letName();
+      n1 = bvNodes.get (r.nextInt (bvNodes.size()));
+      assert (n1.getType() instanceof BVType);
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" ((_ to_fp");
+      if (r.nextInt(3) == 0) {
+        /* reinterpret an eb+sb bit pattern; no rounding takes place */
+        builder.append (" ");
+        builder.append (type.getExponentBits());
+        builder.append (" ");
+        builder.append (type.getSignificandBits());
+        builder.append (") ");
+        builder.append (adaptBW (r, n1, type.getExponentBits() +
+                                        type.getSignificandBits()));
+      } else {
+        if (r.nextBoolean())
+          builder.append ("_unsigned");
+        builder.append (" ");
+        builder.append (type.getExponentBits());
+        builder.append (" ");
+        builder.append (type.getSignificandBits());
+        builder.append (") ");
+        builder.append (selectRoundingMode (r, rmNodes));
+        builder.append (" ");
+        builder.append (n1.getName());
+      }
+      builder.append (")");
+      builder.append (letClose());
+      fpNodes.add (new SMTNode (type, name));
+    }
+    output.print (builder.toString());
+
+    return numConversions;
+  }
+
+  /* Floating point to bit-vector.  fp.to_ubv and fp.to_sbv are partial: the
+   * result is unspecified for NaN, for the infinities and for values out of
+   * range, which is exactly the corner a fuzzer wants to reach. */
+  private static int generateFPToBVLayer (Random r, List<SMTNode> fpNodes,
+                                          List<SMTNode> bvNodes,
+                                          List<SMTNode> rmNodes,
+                                          int numConversions, int minBW,
+                                          int maxBW){
+    int bw;
+    String name;
+    SMTNode n1;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (fpNodes != null);
+    assert (!fpNodes.isEmpty());
+    assert (bvNodes != null);
+    assert (numConversions >= 0);
+    assert (minBW > 0);
+    assert (maxBW >= minBW);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numConversions; i++) {
+      bw = selectRandValRange (r, minBW, maxBW);
+      name = letName();
+      n1 = fpNodes.get (r.nextInt (fpNodes.size()));
+      assert (n1.getType() instanceof FPType);
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" ((_ fp.to_");
+      builder.append (r.nextBoolean() ? "ubv" : "sbv");
+      builder.append (" ");
+      builder.append (bw);
+      builder.append (") ");
+      builder.append (selectRoundingMode (r, rmNodes));
+      builder.append (" ");
+      builder.append (n1.getName());
+      builder.append (")");
+      builder.append (letClose());
+      bvNodes.add (new SMTNode (new BVType (bw), name));
+    }
+    output.print (builder.toString());
+
+    return numConversions;
+  }
+
+  /* Floating point to Real, and Real to floating point.  fp.to_real is the
+   * other partial conversion of the theory. */
+  private static int generateFPToRealLayer (Random r, List<SMTNode> fpNodes,
+                                            List<SMTNode> realNodes,
+                                            int numConversions){
+    String name;
+    SMTNode n1;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (fpNodes != null);
+    assert (!fpNodes.isEmpty());
+    assert (realNodes != null);
+    assert (numConversions >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numConversions; i++) {
+      name = letName();
+      n1 = fpNodes.get (r.nextInt (fpNodes.size()));
+      assert (n1.getType() instanceof FPType);
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" (fp.to_real ");
+      builder.append (n1.getName());
+      builder.append (")");
+      builder.append (letClose());
+      realNodes.add (new SMTNode (RealType.realType, name));
+    }
+    output.print (builder.toString());
+
+    return numConversions;
+  }
+
+  private static int generateRealToFPLayer (Random r, List<SMTNode> realNodes,
+                                            List<SMTNode> fpNodes,
+                                            List<SMTNode> rmNodes,
+                                            int numConversions){
+    String name;
+    FPType type;
+    SMTNode n1;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (realNodes != null);
+    assert (!realNodes.isEmpty());
+    assert (fpNodes != null);
+    assert (numConversions >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numConversions; i++) {
+      type = selectFPSort (r);
+      name = letName();
+      n1 = realNodes.get (r.nextInt (realNodes.size()));
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" ((_ to_fp ");
+      builder.append (type.getExponentBits());
+      builder.append (" ");
+      builder.append (type.getSignificandBits());
+      builder.append (") ");
+      builder.append (selectRoundingMode (r, rmNodes));
+      builder.append (" ");
+      builder.append (n1.getName());
+      builder.append (")");
+      builder.append (letClose());
+      fpNodes.add (new SMTNode (type, name));
+    }
+    output.print (builder.toString());
+
+    return numConversions;
+  }
+
   private static int generateFPPredicateLayer (Random r, List<SMTNode> fpNodes,
                                                List<SMTNode> boolNodes,
                                                List<SMTNode> rmNodes,
@@ -2798,6 +3005,7 @@ public class FuzzSMT {
     SMTNodeKind []kinds;
     String name;
     HashMap<SMTNode, Integer> todoNodes;
+    SMTNode []todoNodesArray;
     SMTNode n1, n2;
     FPType curType;
     StringBuilder builder;
@@ -2831,7 +3039,14 @@ public class FuzzSMT {
       builder.append (" (");
 
       kind = kinds[r.nextInt (kinds.length)];
-      n1 = fpNodes.get (r.nextInt (sizeFPNodes));
+      /* as in the term layer, favour the terms that still need a reference
+       * so that the layer converges quickly */
+      if (r.nextBoolean()) {
+        todoNodesArray = todoNodes.keySet().toArray (new SMTNode[0]);
+        n1 = todoNodesArray[r.nextInt (todoNodesArray.length)];
+      } else {
+        n1 = fpNodes.get (r.nextInt (sizeFPNodes));
+      }
       assert (n1.getType() instanceof FPType);
       curType = (FPType) n1.getType();
       builder.append (kind.getString (smtlib1));
@@ -3951,7 +4166,7 @@ public class FuzzSMT {
 
 
 
-  private static final String version = "0.32";
+  private static final String version = "0.33";
 
   private static final String usage = 
 "********************************************************************************\n" +
@@ -3962,7 +4177,8 @@ public class FuzzSMT {
 "\n" +
 "usage: fuzzsmt <logic> [option...]\n\n" +
 "  <logic> is one of the following:\n" + 
-"  QF_A, QF_ABV, QF_AUFBV, QF_AUFLIA, QF_AX, QF_BV, QF_FP, QF_IDL, QF_LIA,\n" +
+"  QF_A, QF_ABV, QF_ABVFP, QF_ABVFPLRA, QF_AUFBV, QF_AUFBVFP, QF_AUFLIA,\n" +
+"  QF_AX, QF_BV, QF_BVFP, QF_BVFPLRA, QF_FP, QF_FPLRA, QF_IDL, QF_LIA,\n" +
 "  QF_LRA, QF_NIA, QF_NRA, QF_RDL, QF_UF, QF_UFBV, QF_UFIDL, QF_UFLIA,\n" +
 "  QF_UFLRA, QF_UFNIA, QF_UFNRA, QF_UFRDL, AUFLIA, AUFLIRA, AUFNIRA and LRA.\n" +
 "\n" +
@@ -4188,13 +4404,14 @@ public class FuzzSMT {
 "  -ma <args>           set min number of arguments to <args>  (default  1)\n" +
 "  -Ma <args>           set max number of arguments to <args>  (default  3)\n" +
 "\n" +
-"QF_FP options:\n" +
-"  -mv <vars>           use min <vars> floating point vars     (default  2)\n" +
-"  -Mv <vars>           use max <vars> floating point vars     (default  5)\n" +
-"  -mc <consts>         use min <const> floating point consts  (default  1)\n" +
-"  -Mc <consts>         use max <const> floating point consts  (default  3)\n" +
-"  -mfprm <vars>        use min <vars> RoundingMode variables  (default  0)\n" +
-"  -Mfprm <vars>        use max <vars> RoundingMode variables  (default  2)\n" +
+"QF_FP, QF_FPLRA, QF_BVFP, QF_BVFPLRA, QF_ABVFP, QF_ABVFPLRA and\n" +
+"QF_AUFBVFP options:\n" +
+"  -mvf <vars>          use min <vars> floating point vars     (default  2)\n" +
+"  -Mvf <vars>          use max <vars> floating point vars     (default  8)\n" +
+"  -mcf <consts>        use min <const> floating point consts  (default  1)\n" +
+"  -Mcf <consts>        use max <const> floating point consts  (default  4)\n" +
+"  -mvrm <vars>         use min <vars> RoundingMode variables  (default  0)\n" +
+"  -Mvrm <vars>         use max <vars> RoundingMode variables  (default  2)\n" +
 "  -fp-any              draw arbitrary (eb,sb) sorts instead of only\n" +
 "                       Float16, Float32, Float64 and Float128\n" +
 "  -Mfpeb <bits>        set max exponent bits with -fp-any     (default 15)\n" +
@@ -4203,6 +4420,13 @@ public class FuzzSMT {
 "                       up to <n> arguments                    (default  3)\n" +
 "  -ref <refs>          set min number of references for terms\n" +
 "                       in input and main layer to <refs>      (default  1)\n" +
+"  all but QF_FP:\n" +
+"  -mconv <n>           use min <n> conversions per direction  (default  1)\n" +
+"  -Mconv <n>           use max <n> conversions per direction  (default  4)\n" +
+"                       to_fp, to_fp_unsigned, fp.to_ubv, fp.to_sbv and\n" +
+"                       fp.to_real cross between the theories\n" +
+"                       -mv -Mv -mc -Mc -mbw -Mbw size the bit-vector or\n" +
+"                       real part, as in the logic it is taken from\n" +
 "  note: floating point is SMT-LIB 2 only, so -smtlib1 is rejected\n" +
 "\n" +
 "QF_IDL, QF_UFIDL, QF_RDL and QF_UFRDL options:\n" +
@@ -4276,9 +4500,18 @@ public class FuzzSMT {
     int minNumVars = 1;
     int maxNumVars = 1;
     int numVars = 0;
+    int minNumVarsFP = 1;
+    int maxNumVarsFP = 1;
+    int numVarsFP = 0;
+    int minNumConstsFP = 1;
+    int maxNumConstsFP = 1;
+    int numConstsFP = 0;
     int minNumRMVars = 0;
     int maxNumRMVars = 0;
     int numRMVars = 0;
+    int minNumConv = 0;
+    int maxNumConv = 0;
+    int numConv = 0;
     int minNumVarsInt = 1;
     int maxNumVarsInt = 1;
     int numVarsInt = 0;
@@ -4583,13 +4816,52 @@ public class FuzzSMT {
         maxBW = 16;
         bvDivMode = BVDivMode.GUARD;
         break;
+      case QF_AUFBVFP:
+        minNumUFuncs = 1;
+        maxNumUFuncs = 2;
+        minNumUPreds = 1;
+        maxNumUPreds = 2;
+        minArgs = 1;
+        maxArgs = 3;
+        /* fall through by intention */
+      case QF_ABVFP:
+      case QF_ABVFPLRA:
+        minNumArrays = 1;
+        maxNumArrays = 3;
+        minNumReads = 1;
+        maxNumReads = 5;
+        minNumWrites = 1;
+        maxNumWrites = 5;
+        minNumExtBool = 0;
+        maxNumExtBool = 2;
+        /* fall through by intention */
+      case QF_BVFP:
+      case QF_BVFPLRA:
+      case QF_FPLRA:
       case QF_FP:
-        minNumVars = 2;
-        maxNumVars = 5;
-        minNumConsts = 1;
-        maxNumConsts = 3;
+        minNumVarsFP = 2;
+        maxNumVarsFP = 8;
+        minNumConstsFP = 1;
+        maxNumConstsFP = 4;
         minNumRMVars = 0;
         maxNumRMVars = 2;
+        /* the bit-vector, real and array parts use the same defaults as the
+         * logics they are taken from */
+        minNumVars = 1;
+        maxNumVars = 3;
+        minNumConsts = 1;
+        maxNumConsts = 2;
+        minBW = 1;
+        maxBW = 16;
+        bvDivMode = BVDivMode.GUARD;
+        if (logic != SMTLogic.QF_FP) {
+          minNumConv = 1;
+          maxNumConv = 4;
+        }
+        /* with no bit-vector part maxBW only bounds the real constants, as
+         * it does in QF_LRA */
+        if (logic == SMTLogic.QF_FPLRA)
+          maxBW = 4;
         break;
       case QF_UFIDL:
       case QF_UFRDL:
@@ -4676,10 +4948,22 @@ public class FuzzSMT {
           maxFPExp = parseIntOption (args, i++, 2, "invalid maximum number of exponent bits");
         } else if (arg.equals("-Mfpsb")) {
           maxFPSig = parseIntOption (args, i++, 2, "invalid maximum number of significand bits");
-        } else if (arg.equals("-mfprm")) {
+        } else if (arg.equals("-mvf")) {
+          minNumVarsFP = parseIntOption (args, i++, 1, "invalid minimum number of floating point variables");
+        } else if (arg.equals("-Mvf")) {
+          maxNumVarsFP = parseIntOption (args, i++, 1, "invalid maximum number of floating point variables");
+        } else if (arg.equals("-mcf")) {
+          minNumConstsFP = parseIntOption (args, i++, 1, "invalid minimum number of floating point constants");
+        } else if (arg.equals("-Mcf")) {
+          maxNumConstsFP = parseIntOption (args, i++, 1, "invalid maximum number of floating point constants");
+        } else if (arg.equals("-mvrm")) {
           minNumRMVars = parseIntOption (args, i++, 0, "invalid minimum number of rounding mode variables");
-        } else if (arg.equals("-Mfprm")) {
+        } else if (arg.equals("-Mvrm")) {
           maxNumRMVars = parseIntOption (args, i++, 0, "invalid maximum number of rounding mode variables");
+        } else if (arg.equals("-mconv")) {
+          minNumConv = parseIntOption (args, i++, 0, "invalid minimum number of conversions");
+        } else if (arg.equals("-Mconv")) {
+          maxNumConv = parseIntOption (args, i++, 0, "invalid maximum number of conversions");
         } else if (arg.equals("-x")) {
           compModeArray = RelCompMode.EQ;
         } else if (arg.equals("-x1")) {
@@ -4879,7 +5163,7 @@ public class FuzzSMT {
 
     /* the FloatingPoint theory was introduced in SMT-LIB 2 and has no
      * SMT-LIB 1 counterpart */
-    if (smtlib1 && logic == SMTLogic.QF_FP)
+    if (smtlib1 && isFPLogic (logic))
       printErrAndExit ("floating point logics cannot be output in SMT-LIB 1 "
                        + "format");
 
@@ -5113,19 +5397,50 @@ public class FuzzSMT {
 	        numVars = selectRandValRange (r, minNumVars, maxNumVars);
 	        numConsts = selectRandValRange (r, minNumConsts, maxNumConsts);
 	        break;
+	      case QF_AUFBVFP:
+	        checkMinMax (minNumUFuncs, maxNumUFuncs, "uninterpreted functions");
+	        checkMinMax (minNumUPreds, maxNumUPreds, "uninterpreted predicates");
+	        checkMinMax (minArgs, maxArgs, "arguments");
+	        numUFuncs = selectRandValRange (r, minNumUFuncs, maxNumUFuncs);
+	        numUPreds = selectRandValRange (r, minNumUPreds, maxNumUPreds);
+	        /* fall through by intention */
+	      case QF_ABVFP:
+	      case QF_ABVFPLRA:
+	        checkMinMax (minNumArrays, maxNumArrays, "arrays");
+	        checkMinMax (minNumReads, maxNumReads, "reads");
+	        checkMinMax (minNumWrites, maxNumWrites, "writes");
+	        checkMinMax (minNumExtBool, maxNumExtBool, "array equalities");
+	        numArrays = selectRandValRange (r, minNumArrays, maxNumArrays);
+	        numReads = selectRandValRange (r, minNumReads, maxNumReads);
+	        numWrites = selectRandValRange (r, minNumWrites, maxNumWrites);
+	        numExtBool = selectRandValRange (r, minNumExtBool, maxNumExtBool);
+	        /* fall through by intention */
+	      case QF_BVFP:
+	      case QF_BVFPLRA:
+	      case QF_FPLRA:
 	      case QF_FP:
-	        assert (minNumVars > 0);
-	        assert (maxNumVars > 0);
-	        assert (minNumConsts > 0);
-	        assert (maxNumConsts > 0);
+	        assert (minNumVarsFP > 0);
+	        assert (maxNumVarsFP > 0);
+	        assert (minNumConstsFP > 0);
+	        assert (maxNumConstsFP > 0);
 	        assert (minNumRMVars >= 0);
 	        assert (maxNumRMVars >= 0);
-	        checkMinMax (minNumVars, maxNumVars, "variables");
-	        checkMinMax (minNumConsts, maxNumConsts, "constants");
+	        assert (minBW > 0);
+	        assert (maxBW > 0);
+	        checkMinMax (minNumVarsFP, maxNumVarsFP, "floating point variables");
+	        checkMinMax (minNumConstsFP, maxNumConstsFP, "floating point constants");
 	        checkMinMax (minNumRMVars, maxNumRMVars, "rounding mode variables");
-	        numVars = selectRandValRange (r, minNumVars, maxNumVars);
-	        numConsts = selectRandValRange (r, minNumConsts, maxNumConsts);
+	        checkMinMax (minNumConv, maxNumConv, "conversions");
+	        numVarsFP = selectRandValRange (r, minNumVarsFP, maxNumVarsFP);
+	        numConstsFP = selectRandValRange (r, minNumConstsFP, maxNumConstsFP);
 	        numRMVars = selectRandValRange (r, minNumRMVars, maxNumRMVars);
+	        numConv = selectRandValRange (r, minNumConv, maxNumConv);
+	        if (logic != SMTLogic.QF_FP) {
+	          checkMinMax (minNumVars, maxNumVars, "variables");
+	          checkMinMax (minNumConsts, maxNumConsts, "constants");
+	          numVars = selectRandValRange (r, minNumVars, maxNumVars);
+	          numConsts = selectRandValRange (r, minNumConsts, maxNumConsts);
+	        }
 	        break;
 	      case QF_LIA:
 	      case QF_NIA:
@@ -5316,17 +5631,106 @@ public class FuzzSMT {
 	                                          uPreds);
 	      }
 	      break;
-	      case QF_FP: {
+	      case QF_FP:
+	      case QF_FPLRA:
+	      case QF_BVFP:
+	      case QF_BVFPLRA:
+	      case QF_ABVFP:
+	      case QF_ABVFPLRA:
+	      case QF_AUFBVFP: {
+	        /* which theories this logic mixes with FloatingPoint */
+	        boolean hasBV = (logic != SMTLogic.QF_FP &&
+	                         logic != SMTLogic.QF_FPLRA);
+	        boolean hasReal = (logic == SMTLogic.QF_FPLRA ||
+	                           logic == SMTLogic.QF_BVFPLRA ||
+	                           logic == SMTLogic.QF_ABVFPLRA);
+	        boolean hasArrays = (logic == SMTLogic.QF_ABVFP ||
+	                             logic == SMTLogic.QF_ABVFPLRA ||
+	                             logic == SMTLogic.QF_AUFBVFP);
 	        ArrayList<SMTNode> fpNodes = new ArrayList<SMTNode>();
 	        ArrayList<SMTNode> rmNodes = new ArrayList<SMTNode>();
-	        generateFPVars (r, fpNodes, numVars);
+	        ArrayList<SMTNode> bvNodes = new ArrayList<SMTNode>();
+	        ArrayList<SMTNode> arrayNodes = new ArrayList<SMTNode>();
+	        ArrayList<SMTNode> realNodes = new ArrayList<SMTNode>();
+	        ArrayList<SMTNode> intConstsAsReal = new ArrayList<SMTNode>();
+	        HashSet<SMTNode> zeroConsts = new HashSet<SMTNode>();
+	        ArrayList<UFunc> uFuncs = new ArrayList<UFunc>();
+	        ArrayList<UPred> uPreds = new ArrayList<UPred>();
+	        BVDivGuards = new HashMap<SMTNode, SMTNodeKind>();
+
+	        if (logic == SMTLogic.QF_AUFBVFP) {
+	          generateUFuncsBV (r, uFuncs, numUFuncs, minArgs, maxArgs, minBW,
+	                            maxBW);
+	          generateUPredsBV (r, uPreds, numUPreds, minArgs, maxArgs, minBW,
+	                            maxBW);
+	        }
+	        generateFPVars (r, fpNodes, numVarsFP);
 	        generateRoundingModeVars (r, rmNodes, numRMVars);
+	        if (hasBV)
+	          generateBVVars (r, bvNodes, numVars, minBW, maxBW);
+	        if (hasArrays)
+	          generateBVArrayVars (r, arrayNodes, numArrays, minBW, maxBW);
+	        if (hasReal)
+	          generateRealVars (realNodes, numVars);
 	        output.println (startFormula());
 
-	        pars += generateFPConsts (r, fpNodes, rmNodes, numConsts);
+	        pars += generateFPConsts (r, fpNodes, rmNodes, numConstsFP);
+	        if (hasBV)
+	          pars += generateBVConsts (r, bvNodes, numConsts, minBW, maxBW);
+	        if (hasReal)
+	          pars += generateRealConstsNotFilledZero (r, intConstsAsReal,
+	                                                   zeroConsts, numConsts,
+	                                                   maxBW, false);
+
+	        /* build the bit-vector and real parts first so that the
+	         * conversions have non-trivial terms to feed on */
+	        if (hasBV)
+	          pars += generateBVLayer (r, bvNodes, minRefs, minBW, maxBW,
+	                                   bvDivMode, BVDivGuards, hasArrays, uFuncs,
+	                                   uPreds);
+	        if (hasArrays) {
+	          while (numWrites > 0 || numReads > 0) {
+	            pars += generateBVWriteLayer (r, arrayNodes, bvNodes,
+	                                          (numWrites >>> 1) + (numWrites & 1));
+	            pars += generateBVReadLayer (r, arrayNodes, bvNodes,
+	                                         (numReads >>> 1) + (numReads & 1));
+	            numWrites >>>= 1;
+	            numReads >>>= 1;
+	          }
+	        }
+	        if (hasReal)
+	          pars += generateRealLayer (r, realNodes, intConstsAsReal,
+	                                     zeroConsts, uFuncs, uPreds, linear,
+	                                     false, minRefs, false);
+
+	        /* cross into floating point, build the floating point layer on
+	         * top of the converted terms, then cross back.  Each theory's term
+	         * layer runs once: running one a second time over the pool it has
+	         * already doubled makes the instances grow out of hand.  Terms
+	         * converted out of floating point are picked up by the predicate
+	         * layers below. */
+	        if (hasBV)
+	          pars += generateBVToFPLayer (r, bvNodes, fpNodes, rmNodes, numConv);
+	        if (hasReal)
+	          pars += generateRealToFPLayer (r, realNodes, fpNodes, rmNodes,
+	                                         numConv);
 	        pars += generateFPLayer (r, fpNodes, rmNodes, minRefs);
+	        if (hasBV)
+	          pars += generateFPToBVLayer (r, fpNodes, bvNodes, rmNodes, numConv,
+	                                       minBW, maxBW);
+	        if (hasReal)
+	          pars += generateFPToRealLayer (r, fpNodes, realNodes, numConv);
+
 	        pars += generateFPPredicateLayer (r, fpNodes, boolNodes, rmNodes,
 	                                          minRefs);
+	        if (hasBV)
+	          pars += generateBVPredicateLayer (r, bvNodes, boolNodes, minRefs,
+	                                            uPreds);
+	        if (hasReal)
+	          pars += generateComparisonLayer (r, realNodes, boolNodes, uPreds,
+	                                           minRefs, RelCompMode.FULL, false);
+	        if (hasArrays)
+	          pars += addArrayExt (r, arrayNodes, boolNodes, numExtBool);
 	      }
 	      break;
 	      case QF_ABV:
@@ -5910,8 +6314,11 @@ public class FuzzSMT {
 	    }
 	    assert (boolNodes.size() == 1);
 	    assert (boolNodes.get(0).getType() == BoolType.boolType);
-	    if (bvDivMode == BVDivMode.GUARD && 
-	        (logic == SMTLogic.QF_ABV || logic == SMTLogic.QF_BV || logic == SMTLogic.QF_AUFBV)){
+	    if (bvDivMode == BVDivMode.GUARD &&
+	        (logic == SMTLogic.QF_ABV || logic == SMTLogic.QF_BV || logic == SMTLogic.QF_AUFBV ||
+	         logic == SMTLogic.QF_BVFP || logic == SMTLogic.QF_BVFPLRA ||
+	         logic == SMTLogic.QF_ABVFP || logic == SMTLogic.QF_ABVFPLRA ||
+	         logic == SMTLogic.QF_AUFBVFP)){
 	      assert (BVDivGuards != null);
 	      pars += addBVDivGuards (boolNodes, BVDivGuards);
 	      assert (boolNodes.size() == 1);

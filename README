@@ -64,7 +64,7 @@
 
 
  ******************************************************************************
- *                              FuzzSMT 0.32                                  *
+ *                              FuzzSMT 0.33                                  *
  ******************************************************************************
 Changes in 0.3
 --------------
@@ -119,8 +119,47 @@ Changes in 0.32
   long fuzzing run still covers the n-ary parser path, but in practice
   distinct is binary.
 
+Changes in 0.33
+---------------
+* The SMT-LIB 2 FloatingPoint theory is now supported, adding the logics
+  QF_FP, QF_FPLRA, QF_BVFP, QF_BVFPLRA, QF_ABVFP, QF_ABVFPLRA and
+  QF_AUFBVFP. The theory was added to SMT-LIB after 0.31 was written, which
+  is why it was missing.
+* Generated floating point terms cover fp.abs, fp.neg, fp.sqrt,
+  fp.roundToIntegral, fp.add, fp.sub, fp.mul, fp.div, fp.rem, fp.min,
+  fp.max, fp.fma and ite. Generated predicates cover fp.leq, fp.lt, fp.geq,
+  fp.gt, fp.eq, the seven classification predicates (fp.isNormal,
+  fp.isSubnormal, fp.isZero, fp.isInfinite, fp.isNaN, fp.isNegative,
+  fp.isPositive) and core = and distinct.
+* All the literal forms are generated: the (fp sign exponent significand)
+  triple, +oo, -oo, +zero, -zero, NaN, and the conversions from a bit
+  pattern and from signed and unsigned machine integers.
+* Rounding modes are drawn from the five constants, in both their short and
+  their long spelling, and from declared RoundingMode variables. Use
+  -mvrm/-Mvrm to control how many such variables are declared.
+* Operands of an fp operator have to agree on both the exponent and the
+  significand width. Where they do not, the operand is converted with the
+  theory's own to_fp rather than with the extract/extend that the
+  bit-vector layers use, so conversions appear throughout the output.
+* Sorts are drawn from Float16, Float32, Float64 and Float128, and the
+  abbreviated names are emitted about half the time. -fp-any instead draws
+  arbitrary (eb,sb) pairs, bounded by -Mfpeb and -Mfpsb.
+* In the mixed logics the theory boundary is crossed in both directions:
+  to_fp and to_fp_unsigned build floating point terms out of bit-vectors
+  and reals, and fp.to_ubv, fp.to_sbv and fp.to_real go the other way. The
+  partial conversions are deliberately left unguarded, so NaN, the
+  infinities and out-of-range values do reach them. -mconv/-Mconv set how
+  many conversions are generated per direction.
+* Floating point exists only in SMT-LIB 2, so -smtlib1 together with any of
+  the floating point logics is rejected rather than silently ignored.
+
 Limitations
 -----------
+* No QF_UFFPDTNIRA: it needs algebraic datatypes, which are not generated
+  for any logic.
+* The arrays in QF_ABVFP, QF_ABVFPLRA and QF_AUFBVFP are bit-vector indexed
+  arrays of bit-vectors. Arrays with floating point elements are not
+  generated.
 * The LRA output is the same as QF_LRA, i.e. no variables are quantified over.
 * No UFLRA & UFNIA logics. Both logics have benchmarks, but aren't currently listed on:
 	http://goedel.cs.uiowa.edu/smtlib/logics.html
