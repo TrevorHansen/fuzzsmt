@@ -35,6 +35,7 @@ public class FuzzSMT {
   private static final int naryDistinctOdds = 32000;
 
 	static boolean fpAnySort = false; // if true, draw arbitrary (eb,sb) instead of the four standard sorts.
+	static boolean fpWideOps = false; // if true, also emit fp.div/fp.rem/fp.fma on sorts wider than Float64.
 	static int maxFPExp = 15; // max exponent bits when -fp-any is given.
 	static int maxFPSig = 24; // max significand bits when -fp-any is given.
 
@@ -2480,6 +2481,18 @@ public class FuzzSMT {
     return fpRoundingModeKinds.contains (kind);
   }
 
+  /* Sorts wider than Float64.  fp.div, fp.rem and fp.fma on these are where
+   * the solvers fall over: they bit-blast into circuits that neither z3 nor
+   * bitwuzla finishes in ten seconds, while the same operators on Float32
+   * are milliseconds.  Since a timed out instance tells a fuzzing run
+   * nothing, the three are left out for such sorts unless -fp-wide-ops asks
+   * for them.  Every other operator, and every sort, is unaffected. */
+  private static boolean fpWideSort (FPType type){
+    assert (type != null);
+
+    return type.getExponentBits() + type.getSignificandBits() > 64;
+  }
+
   private static FPType selectFPSort (Random r){
     int eb, sb;
 
@@ -2708,6 +2721,7 @@ public class FuzzSMT {
     SMTNodeKind kind;
     EnumSet<SMTNodeKind> kindSet;
     SMTNodeKind []kinds;
+    SMTNodeKind []narrowKinds;
     String name;
     HashMap<SMTNode, Integer> todoNodes;
     SMTNode []todoNodesArray;
@@ -2726,6 +2740,13 @@ public class FuzzSMT {
     kindSet.add (SMTNodeKind.ITE);
     kinds = kindSet.toArray (new SMTNodeKind[0]);
 
+    /* the same set without the operators that make the widest sorts
+     * intractable; see fpWideSort */
+    kindSet.remove (SMTNodeKind.FP_DIV);
+    kindSet.remove (SMTNodeKind.FP_REM);
+    kindSet.remove (SMTNodeKind.FP_FMA);
+    narrowKinds = kindSet.toArray (new SMTNodeKind[0]);
+
     oldSize = nodes.size();
     todoNodes = new HashMap<SMTNode, Integer>();
     for (int i = 0; i < oldSize; i++)
@@ -2738,7 +2759,6 @@ public class FuzzSMT {
       builder.append (name);
       builder.append (" (");
 
-      kind = kinds[r.nextInt (kinds.length)];
       /* Half of the time take the first operand from the nodes that still
        * need a reference.  Picking uniformly from a list that grows by one
        * every iteration makes clearing the last few entries a coupon
@@ -2752,8 +2772,14 @@ public class FuzzSMT {
       }
       assert (n1.getType() instanceof FPType);
       /* the sort of the first operand is the sort of the result; every
-       * other operand is converted to it */
+       * other operand is converted to it.  The operator is picked once the
+       * result sort is known, because the widest sorts do not get all of
+       * them. */
       curType = (FPType) n1.getType();
+      if (fpWideOps || !fpWideSort (curType))
+        kind = kinds[r.nextInt (kinds.length)];
+      else
+        kind = narrowKinds[r.nextInt (narrowKinds.length)];
 
       if (kind == SMTNodeKind.ITE) {
         n2 = nodes.get (r.nextInt (nodes.size()));
@@ -4414,6 +4440,9 @@ public class FuzzSMT {
 "  -Mvrm <vars>         use max <vars> RoundingMode variables  (default  2)\n" +
 "  -fp-any              draw arbitrary (eb,sb) sorts instead of only\n" +
 "                       Float16, Float32, Float64 and Float128\n" +
+"  -fp-wide-ops         also emit fp.div, fp.rem and fp.fma on sorts wider\n" +
+"                       than Float64.  Off by default: on Float128 they are\n" +
+"                       what makes instances time out rather than solve\n" +
 "  -Mfpeb <bits>        set max exponent bits with -fp-any     (default 15)\n" +
 "  -Mfpsb <bits>        set max significand bits with -fp-any  (default 24)\n" +
 "  -nary <n>            emit the chainable comparisons and = distinct with\n" +
@@ -4944,6 +4973,8 @@ public class FuzzSMT {
           maxNary = parseIntOption (args, i++, 2, "invalid maximum n-ary arity");
         } else if (arg.equals("-fp-any")) {
           fpAnySort = true;
+        } else if (arg.equals("-fp-wide-ops")) {
+          fpWideOps = true;
         } else if (arg.equals("-Mfpeb")) {
           maxFPExp = parseIntOption (args, i++, 2, "invalid maximum number of exponent bits");
         } else if (arg.equals("-Mfpsb")) {
