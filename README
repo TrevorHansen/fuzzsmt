@@ -128,7 +128,7 @@ Limitations
 
 Testing of 0.31
 ---------------
-I ran the below script for a while. Z3 2.16 & "CVC3 2010-09-25" were able to parse most of the generated instances.
+Example validation. The below script was run for a while; Z3 2.16 & "CVC3 2010-09-25" were able to parse most of the generated instances.
 
 while [ 1 -eq 1 ]; do
 	for t in  'QF_ABV' 'QF_AUFBV' 'QF_AUFLIA' 'QF_AX' 'QF_BV' 'QF_IDL' 'QF_L
