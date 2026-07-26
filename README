@@ -15,14 +15,17 @@
   fuzzer yourself, you just need a compatible Java runtime environment
   (supporting Java 5 or higher) in order to run the fuzzer.
 
-  I use Apache Ant as a build system and I also provide the build-file
-  'build.xml'. So, if you want to build the fuzzer, you have to install
-  Ant. Then, go to the working directory of FuzzSMT and simply type 'ant'
-  to build the fuzzer. For UNIX/LINUX system I provide a simple wrapper
-  shell script 'fuzzsmt' which is convenient to use.
+  To build the fuzzer, go to the working directory of FuzzSMT and run
+  './build.sh'. It compiles the sources with javac and packages them into
+  'fuzzsmt.jar', so a JDK is all you need. The jar is not kept in the
+  repository, so this is the first thing to do after cloning. Anyone who
+  would rather use Apache Ant can still type 'ant' instead; the build-file
+  'build.xml' does the same thing. For UNIX/LINUX system I provide a simple
+  wrapper shell script 'fuzzsmt' which is convenient to use.
 
-  If you want to enable the debugging code of the fuzzer, then enable 
-  compilation with debugging info in the build file 'build.xml':
+  If you want to enable the debugging code of the fuzzer, then compile with
+  debugging info: add '-g' to the javac line in 'build.sh', or with Ant set
+  it in the build file 'build.xml':
 
   <javac debug="yes" srcdir="${src}" destdir="${build}"/>
 

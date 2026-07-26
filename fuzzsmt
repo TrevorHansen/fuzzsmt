@@ -1,3 +1,7 @@
 #!/bin/sh
+# fuzzsmt.jar is not kept in the repository; build it first with ./build.sh
+if [ ! -f fuzzsmt.jar ]; then
+  echo "fuzzsmt.jar not found, run ./build.sh first" >&2
+  exit 1
+fi
 java -jar fuzzsmt.jar $*
-
