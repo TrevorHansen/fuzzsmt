@@ -64,17 +64,17 @@
 
 
  ******************************************************************************
- *                              FuzzSMT 0.31                                  *
- *                             Trevor Hansen                                  * 
+ *                              FuzzSMT 0.32                                  *
+ *                             Trevor Hansen                                  *
  ******************************************************************************
 Changes in 0.3
 --------------
 * By default, FuzzSMT now outputs SMT-LIB2 format. To output SMT-LIB1 format put
   the -smtlib1 command line argument after the name of the logic.
 * The -bulk-export option creates instances in the current directory.
-  Files are named f_[0..n).smt or f_[0..n).smt2. This feature was added because the 
+  Files are named f_[0..n).smt or f_[0..n).smt2. This feature was added because the
   JVM is slow to load, the JVM takes perhaps 100ms to load, but it only takes around
-  1ms to generate each instance. Using this feature means that 100 instances can be 
+  1ms to generate each instance. Using this feature means that 100 instances can be
   generated in around 200ms instead of 10s. i.e. FuzzSMT is asymptotically 100 times
   faster.
 * The QF_AUFBV logic now has a default maximum number of uninterpreted predicates
@@ -82,12 +82,19 @@ Changes in 0.3
   uninterpreted functions would be output by default.
 * The LRA & QF_ABV logics have been added. No old logics have been removed, for
   instance QF_A remains even though it is not an SMT-LIB2 logic.
-* The amount to rotate left and rotate right are now taken from 
+* The amount to rotate left and rotate right are now taken from
   [0,2 + bitwidth), previously it was in [0, bitwidth). This generates instances
   that rely on the modulo-bitwidth behaviour of rotate left/right.
 
+Changes in 0.31
+---------------
+* The version number has been changed.
+* QF_RDL no longer outputs single arity pluses, e.g. (+ v12). The specification of QF_RDL was changed in December 2010.
+* It's possible to specify a prefix now when outputing bulk files. This is to help when multiple threads are operating in the same directory.
+* The default file prefix when bulk exporting is now _file_
+
 Changes in 0.32
---------------
+---------------
 * The SMT-LIB 2 bit-vector overflow-detection predicates are now generated for
   the bit-vector logics (QF_BV, QF_ABV, QF_AUFBV, QF_UFBV):
   bvnego, bvuaddo, bvsaddo, bvusubo, bvssubo, bvumulo, bvsmulo, bvsdivo.
@@ -101,36 +108,27 @@ Changes in 0.32
   and, or, xor, =>, = and distinct. It exercises solver parser paths that
   binary-only output never reaches.
   NOTE: the default limit is 3, so the default output of 0.32 differs from
-  0.3 even with no new options given. Pass -nary 2 to restore the previous
+  0.31 even with no new options given. Pass -nary 2 to restore the previous
   binary-only behaviour. Like the overflow predicates, this is SMT-LIB 2
   only and never affects -smtlib1 output.
 * The Boolean layer now seeds its operand pool with the constants true and
   false, so they appear in generated instances instead of never being used.
-* This lifts the "no distincts with greater than 2 operands" limitation
-  listed for 0.31 below: distinct now appears in the Boolean layer and is
-  sometimes generated with more than two operands. Because distinct over
-  three or more Booleans is trivially false by pigeonhole, the n-ary form is
-  deliberately made very rare (well under one occurrence in ten thousand
-  generated instances): it stays reachable, so a long fuzzing run still
-  covers the n-ary parser path, but in practice distinct is binary.
+* Distinct with more than two operands is now generated, lifting a 0.31
+  limitation. Because distinct over three or more Booleans is trivially false
+  by pigeonhole, the n-ary form is deliberately made very rare (well under one
+  occurrence in ten thousand generated instances): it stays reachable, so a
+  long fuzzing run still covers the n-ary parser path, but in practice
+  distinct is binary.
 
-Changes in 0.31
---------------
-* The version number has been changed.
-* QF_RDL no longer outputs single arity pluses, e.g. (+ v12). The specification of QF_RDL was changed in December 2010.
-* It's possible to specify a prefix now when outputing bulk files. This is to help when multiple threads are operating in the same directory.
-* The default file prefix when bulk exporting is now _file_
-
-Limitations of 0.31
---------------
-* No distincts with greater than 2 operands are generated.
+Limitations
+-----------
 * The LRA output is the same as QF_LRA, i.e. no variables are quantified over.
 * No UFLRA & UFNIA logics. Both logics have benchmarks, but aren't currently listed on:
-	http://goedel.cs.uiowa.edu/smtlib/logics.html 
+	http://goedel.cs.uiowa.edu/smtlib/logics.html
 * Sometimes QF_UFBV outputs divisions where the denominator isn't constrained to be non-zero.
 
 Testing of 0.31
---------------
+---------------
 I ran the below script for a while. Z3 2.16 & "CVC3 2010-09-25" were able to parse most of the generated instances.
 
 while [ 1 -eq 1 ]; do
