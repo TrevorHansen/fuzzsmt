@@ -33,7 +33,12 @@ public class FuzzSMT {
    * covered over a long fuzzing run, but it is rare enough that it is
    * effectively absent from any single batch of instances. */
   private static final int naryDistinctOdds = 32000;
-	static String bulkPrefix =""; // Prepend to bulk output. 	
+
+	static boolean fpAnySort = false; // if true, draw arbitrary (eb,sb) instead of the four standard sorts.
+	static int maxFPExp = 15; // max exponent bits when -fp-any is given.
+	static int maxFPSig = 24; // max significand bits when -fp-any is given.
+
+	static String bulkPrefix =""; // Prepend to bulk output.
 	static java.io.PrintStream output; // where output is written to.
 		
 
@@ -2439,6 +2444,424 @@ public class FuzzSMT {
     return boolNodes.size() - oldSize;
   }
 
+/*----------------------------------------------------------------------------*/
+/* Floating point (SMT-LIB 2 FloatingPoint theory)                            */
+/*----------------------------------------------------------------------------*/
+
+  /* the four sorts the theory gives an abbreviation to */
+  private static final FPType []fpStandardSorts = {
+    new FPType (5, 11),   /* Float16  */
+    new FPType (8, 24),   /* Float32  */
+    new FPType (11, 53),  /* Float64  */
+    new FPType (15, 113)  /* Float128 */
+  };
+
+  /* both the short and the long spelling of each rounding mode, so that
+   * both parser paths are exercised */
+  private static final String []roundingModes = {
+    "RNE", "RNA", "RTP", "RTN", "RTZ",
+    "roundNearestTiesToEven", "roundNearestTiesToAway",
+    "roundTowardPositive", "roundTowardNegative", "roundTowardZero"
+  };
+
+  /* the operators that take a RoundingMode as their first argument */
+  private static final EnumSet<SMTNodeKind> fpRoundingModeKinds =
+    EnumSet.of (SMTNodeKind.FP_SQRT, SMTNodeKind.FP_ROUND_TO_INTEGRAL,
+                SMTNodeKind.FP_ADD, SMTNodeKind.FP_SUB, SMTNodeKind.FP_MUL,
+                SMTNodeKind.FP_DIV, SMTNodeKind.FP_FMA);
+
+  /* the chainable comparisons, used as ite conditions in the term layer */
+  private static final SMTNodeKind []fpComparisonKinds = {
+    SMTNodeKind.FP_LEQ, SMTNodeKind.FP_LT, SMTNodeKind.FP_GEQ,
+    SMTNodeKind.FP_GT, SMTNodeKind.FP_EQ
+  };
+
+  private static boolean fpNeedsRoundingMode (SMTNodeKind kind){
+    return fpRoundingModeKinds.contains (kind);
+  }
+
+  private static FPType selectFPSort (Random r){
+    int eb, sb;
+
+    assert (r != null);
+
+    if (!fpAnySort)
+      return fpStandardSorts[r.nextInt (fpStandardSorts.length)];
+    eb = selectRandValRange (r, 2, maxFPExp);
+    sb = selectRandValRange (r, 2, maxFPSig);
+    return new FPType (eb, sb);
+  }
+
+  /* How the sort is spelled in a declaration.  Where an abbreviation exists
+   * it is used half of the time; the sorts are equal either way. */
+  private static String fpSortString (Random r, FPType type){
+    String abbrev;
+
+    assert (r != null);
+    assert (type != null);
+
+    abbrev = type.getAbbreviation();
+    if (abbrev != null && r.nextBoolean())
+      return abbrev;
+    return type.toString (false);
+  }
+
+  /* A RoundingMode term: one of the five constants, or a declared
+   * RoundingMode variable if any exist. */
+  private static String selectRoundingMode (Random r, List<SMTNode> rmNodes){
+    assert (r != null);
+
+    if (rmNodes != null && !rmNodes.isEmpty() && r.nextInt(4) == 0)
+      return rmNodes.get(r.nextInt (rmNodes.size())).getName();
+    return roundingModes[r.nextInt (roundingModes.length)];
+  }
+
+  private static String randomBits (Random r, int numBits){
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (numBits > 0);
+
+    builder = new StringBuilder (numBits + 2);
+    builder.append ("#b");
+    for (int i = 0; i < numBits; i++)
+      builder.append (r.nextBoolean() ? '1' : '0');
+    return builder.toString();
+  }
+
+  /* Use n where a term of sort 'type' is expected.  Floating point operands
+   * must agree on both indices and there is no extract/extend to fall back
+   * on as there is for bit-vectors, so the theory's own to_fp conversion is
+   * used.  That conversion rounds, hence the RoundingMode. */
+  private static String adaptFP (Random r, SMTNode n, FPType type,
+                                 List<SMTNode> rmNodes){
+    FPType nType;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (n != null);
+    assert (type != null);
+    assert (n.getType() instanceof FPType);
+
+    nType = (FPType) n.getType();
+    if (nType.equals (type))
+      return n.getName();
+
+    builder = new StringBuilder();
+    builder.append ("((_ to_fp ");
+    builder.append (type.getExponentBits());
+    builder.append (" ");
+    builder.append (type.getSignificandBits());
+    builder.append (") ");
+    builder.append (selectRoundingMode (r, rmNodes));
+    builder.append (" ");
+    builder.append (n.getName());
+    builder.append (")");
+    return builder.toString();
+  }
+
+  private static int generateFPVars (Random r, List<SMTNode> nodes,
+                                     int numVars){
+    String name;
+    FPType type;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (nodes != null);
+    assert (numVars >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numVars; i++) {
+      type = selectFPSort (r);
+      name = "v" + SMTNode.getNodeCtr();
+      builder.append ("(declare-fun ");
+      builder.append (name);
+      builder.append (" () ");
+      builder.append (fpSortString (r, type));
+      builder.append (")\n");
+      nodes.add (new SMTNode (type, name));
+    }
+    output.print (builder.toString());
+
+    return numVars;
+  }
+
+  private static int generateRoundingModeVars (Random r, List<SMTNode> nodes,
+                                               int numVars){
+    String name;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (nodes != null);
+    assert (numVars >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numVars; i++) {
+      name = "rm" + SMTNode.getNodeCtr();
+      builder.append ("(declare-fun ");
+      builder.append (name);
+      builder.append (" () RoundingMode)\n");
+      nodes.add (new SMTNode (RoundingModeType.roundingModeType, name));
+    }
+    output.print (builder.toString());
+
+    return numVars;
+  }
+
+  /* Floating point literals.  Every form the theory offers is generated:
+   * the (fp sign exponent significand) triple, the five special constants,
+   * the bit pattern reinterpretation ((_ to_fp eb sb) bv) and the two
+   * rounding conversions from a signed and an unsigned machine integer. */
+  private static int generateFPConsts (Random r, List<SMTNode> nodes,
+                                       List<SMTNode> rmNodes, int numConsts){
+    int bw;
+    String name;
+    FPType type;
+    BigInteger bi;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (nodes != null);
+    assert (numConsts >= 0);
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numConsts; i++) {
+      type = selectFPSort (r);
+      name = letName();
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" ");
+      switch (r.nextInt (6)) {
+        case 0:
+          /* (fp sign exponent significand): the significand literal holds
+           * all but the hidden bit */
+          builder.append ("(fp ");
+          builder.append (randomBits (r, 1));
+          builder.append (" ");
+          builder.append (randomBits (r, type.getExponentBits()));
+          builder.append (" ");
+          builder.append (randomBits (r, type.getSignificandBits() - 1));
+          builder.append (")");
+          break;
+        case 1:
+          /* one of the five special constants */
+          builder.append ("(_ ");
+          switch (r.nextInt (5)) {
+            case 0:  builder.append ("+oo");   break;
+            case 1:  builder.append ("-oo");   break;
+            case 2:  builder.append ("+zero"); break;
+            case 3:  builder.append ("-zero"); break;
+            default: builder.append ("NaN");   break;
+          }
+          builder.append (" ");
+          builder.append (type.getExponentBits());
+          builder.append (" ");
+          builder.append (type.getSignificandBits());
+          builder.append (")");
+          break;
+        case 2:
+          /* ((_ to_fp eb sb) bv) reinterprets an eb+sb bit pattern and
+           * takes no rounding mode */
+          builder.append ("((_ to_fp ");
+          builder.append (type.getExponentBits());
+          builder.append (" ");
+          builder.append (type.getSignificandBits());
+          builder.append (") ");
+          builder.append (randomBits (r,
+            type.getExponentBits() + type.getSignificandBits()));
+          builder.append (")");
+          break;
+        default:
+          /* rounding conversion from a machine integer of some width */
+          bw = selectRandValRange (r, 1, 16);
+          bi = new BigInteger (bw, r);
+          builder.append ("((_ to_fp");
+          if (r.nextBoolean())
+            builder.append ("_unsigned");
+          builder.append (" ");
+          builder.append (type.getExponentBits());
+          builder.append (" ");
+          builder.append (type.getSignificandBits());
+          builder.append (") ");
+          builder.append (selectRoundingMode (r, rmNodes));
+          builder.append (" (_ bv");
+          builder.append (bi.toString());
+          builder.append (" ");
+          builder.append (bw);
+          builder.append ("))");
+          break;
+      }
+      builder.append (letClose());
+      nodes.add (new SMTNode (type, name));
+    }
+    output.print (builder.toString());
+
+    return numConsts;
+  }
+
+  private static int generateFPLayer (Random r, List<SMTNode> nodes,
+                                      List<SMTNode> rmNodes, int minRefs){
+    int oldSize;
+    SMTNodeKind kind;
+    EnumSet<SMTNodeKind> kindSet;
+    SMTNodeKind []kinds;
+    String name;
+    HashMap<SMTNode, Integer> todoNodes;
+    SMTNode n1, n2;
+    FPType curType;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (nodes != null);
+    assert (!nodes.isEmpty());
+    assert (minRefs > 0);
+    assert (!smtlib1);
+    assert (SMTNodeKind.FP_ABS.ordinal() < SMTNodeKind.FP_MAX.ordinal());
+
+    kindSet = EnumSet.range (SMTNodeKind.FP_ABS, SMTNodeKind.FP_MAX);
+    kindSet.add (SMTNodeKind.ITE);
+    kinds = kindSet.toArray (new SMTNodeKind[0]);
+
+    oldSize = nodes.size();
+    todoNodes = new HashMap<SMTNode, Integer>();
+    for (int i = 0; i < oldSize; i++)
+      todoNodes.put (nodes.get(i), new Integer(0));
+
+    builder = new StringBuilder();
+    while (!todoNodes.isEmpty()){
+      name = letName();
+      builder.append (letStart());
+      builder.append (name);
+      builder.append (" (");
+
+      kind = kinds[r.nextInt (kinds.length)];
+      n1 = nodes.get (r.nextInt (nodes.size()));
+      assert (n1.getType() instanceof FPType);
+      /* the sort of the first operand is the sort of the result; every
+       * other operand is converted to it */
+      curType = (FPType) n1.getType();
+
+      if (kind == SMTNodeKind.ITE) {
+        n2 = nodes.get (r.nextInt (nodes.size()));
+        assert (n2.getType() instanceof FPType);
+        builder.append ("ite (");
+        builder.append (fpComparisonKinds[r.nextInt (fpComparisonKinds.length)]
+                        .getString (smtlib1));
+        builder.append (" ");
+        builder.append (n1.getName());
+        builder.append (" ");
+        builder.append (adaptFP (r, n2, curType, rmNodes));
+        builder.append (") ");
+        builder.append (n1.getName());
+        builder.append (" ");
+        builder.append (adaptFP (r, n2, curType, rmNodes));
+        updateNodeRefs (todoNodes, n1, minRefs);
+        updateNodeRefs (todoNodes, n2, minRefs);
+      } else {
+        builder.append (kind.getString (smtlib1));
+        if (fpNeedsRoundingMode (kind)) {
+          builder.append (" ");
+          builder.append (selectRoundingMode (r, rmNodes));
+        }
+        builder.append (" ");
+        builder.append (n1.getName());
+        updateNodeRefs (todoNodes, n1, minRefs);
+        for (int i = 1; i < kind.getArity(); i++) {
+          n2 = nodes.get (r.nextInt (nodes.size()));
+          assert (n2.getType() instanceof FPType);
+          builder.append (" ");
+          builder.append (adaptFP (r, n2, curType, rmNodes));
+          updateNodeRefs (todoNodes, n2, minRefs);
+        }
+      }
+
+      builder.append (")");
+      builder.append (letClose());
+      nodes.add (new SMTNode (curType, name));
+    }
+    output.print (builder.toString());
+    assert (nodes.size() - oldSize > 0);
+
+    return nodes.size() - oldSize;
+  }
+
+  private static int generateFPPredicateLayer (Random r, List<SMTNode> fpNodes,
+                                               List<SMTNode> boolNodes,
+                                               List<SMTNode> rmNodes,
+                                               int minRefs){
+    int oldSize, sizeFPNodes, nary;
+    SMTNodeKind kind;
+    EnumSet<SMTNodeKind> kindSet;
+    SMTNodeKind []kinds;
+    String name;
+    HashMap<SMTNode, Integer> todoNodes;
+    SMTNode n1, n2;
+    FPType curType;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (fpNodes != null);
+    assert (!fpNodes.isEmpty());
+    assert (boolNodes != null);
+    assert (minRefs > 0);
+    assert (!smtlib1);
+    assert (SMTNodeKind.FP_LEQ.ordinal() < SMTNodeKind.FP_IS_POSITIVE.ordinal());
+
+    /* FP_LEQ..FP_IS_POSITIVE covers the comparisons and the classification
+     * predicates */
+    kindSet = EnumSet.range (SMTNodeKind.FP_LEQ, SMTNodeKind.FP_IS_POSITIVE);
+    kindSet.add (SMTNodeKind.EQ);
+    kindSet.add (SMTNodeKind.DISTINCT);
+    kinds = kindSet.toArray (new SMTNodeKind[0]);
+
+    todoNodes = new HashMap<SMTNode, Integer>();
+    sizeFPNodes = fpNodes.size();
+    for (int i = 0; i < sizeFPNodes; i++)
+      todoNodes.put (fpNodes.get(i), new Integer(0));
+
+    builder = new StringBuilder();
+    oldSize = boolNodes.size();
+    while (!todoNodes.isEmpty()){
+      name = fletName();
+      builder.append (fletStart());
+      builder.append (name);
+      builder.append (" (");
+
+      kind = kinds[r.nextInt (kinds.length)];
+      n1 = fpNodes.get (r.nextInt (sizeFPNodes));
+      assert (n1.getType() instanceof FPType);
+      curType = (FPType) n1.getType();
+      builder.append (kind.getString (smtlib1));
+      builder.append (" ");
+      builder.append (n1.getName());
+      updateNodeRefs (todoNodes, n1, minRefs);
+
+      if (kind.getArity() != 1) {
+        /* the comparisons are chainable and = and distinct are variadic, so
+         * emit 2..maxNary operands as the bit-vector layers do */
+        nary = 2 + r.nextInt (maxNary - 1);
+        for (int i = 1; i < nary; i++) {
+          n2 = fpNodes.get (r.nextInt (sizeFPNodes));
+          assert (n2.getType() instanceof FPType);
+          builder.append (" ");
+          builder.append (adaptFP (r, n2, curType, rmNodes));
+          updateNodeRefs (todoNodes, n2, minRefs);
+        }
+      }
+
+      builder.append (")");
+      builder.append (letClose());
+      boolNodes.add (new SMTNode (BoolType.boolType, name));
+    }
+    output.print (builder.toString());
+    assert (boolNodes.size() - oldSize > 0);
+
+    return boolNodes.size() - oldSize;
+  }
+
   private static int generateIDLLayer (Random r, List<SMTNode> intVars,
                                        List<SMTNode> intConsts,
                                        List<SMTNode> boolNodes, int minRefs){
@@ -3539,9 +3962,9 @@ public class FuzzSMT {
 "\n" +
 "usage: fuzzsmt <logic> [option...]\n\n" +
 "  <logic> is one of the following:\n" + 
-"  QF_A, QF_ABV, QF_AUFBV, QF_AUFLIA, QF_AX, QF_BV, QF_IDL, QF_LIA, QF_LRA,\n" + 
-"  QF_NIA, QF_NRA, QF_RDL, QF_UF, QF_UFBV, QF_UFIDL, QF_UFLIA, QF_UFLRA,\n" +
-"  QF_UFNIA, QF_UFNRA, QF_UFRDL, AUFLIA, AUFLIRA, AUFNIRA and LRA.\n" + 
+"  QF_A, QF_ABV, QF_AUFBV, QF_AUFLIA, QF_AX, QF_BV, QF_FP, QF_IDL, QF_LIA,\n" +
+"  QF_LRA, QF_NIA, QF_NRA, QF_RDL, QF_UF, QF_UFBV, QF_UFIDL, QF_UFLIA,\n" +
+"  QF_UFLRA, QF_UFNIA, QF_UFNRA, QF_UFRDL, AUFLIA, AUFLIRA, AUFNIRA and LRA.\n" +
 "\n" +
 "  for details about SMT see: www.smtlib.org\n" +
 "\n" +
@@ -3765,6 +4188,23 @@ public class FuzzSMT {
 "  -ma <args>           set min number of arguments to <args>  (default  1)\n" +
 "  -Ma <args>           set max number of arguments to <args>  (default  3)\n" +
 "\n" +
+"QF_FP options:\n" +
+"  -mv <vars>           use min <vars> floating point vars     (default  2)\n" +
+"  -Mv <vars>           use max <vars> floating point vars     (default  5)\n" +
+"  -mc <consts>         use min <const> floating point consts  (default  1)\n" +
+"  -Mc <consts>         use max <const> floating point consts  (default  3)\n" +
+"  -mfprm <vars>        use min <vars> RoundingMode variables  (default  0)\n" +
+"  -Mfprm <vars>        use max <vars> RoundingMode variables  (default  2)\n" +
+"  -fp-any              draw arbitrary (eb,sb) sorts instead of only\n" +
+"                       Float16, Float32, Float64 and Float128\n" +
+"  -Mfpeb <bits>        set max exponent bits with -fp-any     (default 15)\n" +
+"  -Mfpsb <bits>        set max significand bits with -fp-any  (default 24)\n" +
+"  -nary <n>            emit the chainable comparisons and = distinct with\n" +
+"                       up to <n> arguments                    (default  3)\n" +
+"  -ref <refs>          set min number of references for terms\n" +
+"                       in input and main layer to <refs>      (default  1)\n" +
+"  note: floating point is SMT-LIB 2 only, so -smtlib1 is rejected\n" +
+"\n" +
 "QF_IDL, QF_UFIDL, QF_RDL and QF_UFRDL options:\n" +
 "  -mv <vars>           use min <vars> variables               (default  1)\n" +
 "  -Mv <vars>           use max <vars> variables               (default  8)\n" +
@@ -3836,6 +4276,9 @@ public class FuzzSMT {
     int minNumVars = 1;
     int maxNumVars = 1;
     int numVars = 0;
+    int minNumRMVars = 0;
+    int maxNumRMVars = 0;
+    int numRMVars = 0;
     int minNumVarsInt = 1;
     int maxNumVarsInt = 1;
     int numVarsInt = 0;
@@ -4140,6 +4583,14 @@ public class FuzzSMT {
         maxBW = 16;
         bvDivMode = BVDivMode.GUARD;
         break;
+      case QF_FP:
+        minNumVars = 2;
+        maxNumVars = 5;
+        minNumConsts = 1;
+        maxNumConsts = 3;
+        minNumRMVars = 0;
+        maxNumRMVars = 2;
+        break;
       case QF_UFIDL:
       case QF_UFRDL:
         minNumUFuncs = 1;
@@ -4219,6 +4670,16 @@ public class FuzzSMT {
           noOverflow = true;
         } else if (arg.equals("-nary")) {
           maxNary = parseIntOption (args, i++, 2, "invalid maximum n-ary arity");
+        } else if (arg.equals("-fp-any")) {
+          fpAnySort = true;
+        } else if (arg.equals("-Mfpeb")) {
+          maxFPExp = parseIntOption (args, i++, 2, "invalid maximum number of exponent bits");
+        } else if (arg.equals("-Mfpsb")) {
+          maxFPSig = parseIntOption (args, i++, 2, "invalid maximum number of significand bits");
+        } else if (arg.equals("-mfprm")) {
+          minNumRMVars = parseIntOption (args, i++, 0, "invalid minimum number of rounding mode variables");
+        } else if (arg.equals("-Mfprm")) {
+          maxNumRMVars = parseIntOption (args, i++, 0, "invalid maximum number of rounding mode variables");
         } else if (arg.equals("-x")) {
           compModeArray = RelCompMode.EQ;
         } else if (arg.equals("-x1")) {
@@ -4415,6 +4876,12 @@ public class FuzzSMT {
         printHelpAndExit();
       }
     }
+
+    /* the FloatingPoint theory was introduced in SMT-LIB 2 and has no
+     * SMT-LIB 1 counterpart */
+    if (smtlib1 && logic == SMTLogic.QF_FP)
+      printErrAndExit ("floating point logics cannot be output in SMT-LIB 1 "
+                       + "format");
 
     if (r == null) /* seed has not been set */
 	      r = new Random();
@@ -4646,6 +5113,20 @@ public class FuzzSMT {
 	        numVars = selectRandValRange (r, minNumVars, maxNumVars);
 	        numConsts = selectRandValRange (r, minNumConsts, maxNumConsts);
 	        break;
+	      case QF_FP:
+	        assert (minNumVars > 0);
+	        assert (maxNumVars > 0);
+	        assert (minNumConsts > 0);
+	        assert (maxNumConsts > 0);
+	        assert (minNumRMVars >= 0);
+	        assert (maxNumRMVars >= 0);
+	        checkMinMax (minNumVars, maxNumVars, "variables");
+	        checkMinMax (minNumConsts, maxNumConsts, "constants");
+	        checkMinMax (minNumRMVars, maxNumRMVars, "rounding mode variables");
+	        numVars = selectRandValRange (r, minNumVars, maxNumVars);
+	        numConsts = selectRandValRange (r, minNumConsts, maxNumConsts);
+	        numRMVars = selectRandValRange (r, minNumRMVars, maxNumRMVars);
+	        break;
 	      case QF_LIA:
 	      case QF_NIA:
 	      case QF_UFLIA:
@@ -4833,6 +5314,19 @@ public class FuzzSMT {
 	                                 BVDivGuards, false, uFuncs, uPreds);
 	        pars += generateBVPredicateLayer (r, bvNodes, boolNodes, minRefs,
 	                                          uPreds);
+	      }
+	      break;
+	      case QF_FP: {
+	        ArrayList<SMTNode> fpNodes = new ArrayList<SMTNode>();
+	        ArrayList<SMTNode> rmNodes = new ArrayList<SMTNode>();
+	        generateFPVars (r, fpNodes, numVars);
+	        generateRoundingModeVars (r, rmNodes, numRMVars);
+	        output.println (startFormula());
+
+	        pars += generateFPConsts (r, fpNodes, rmNodes, numConsts);
+	        pars += generateFPLayer (r, fpNodes, rmNodes, minRefs);
+	        pars += generateFPPredicateLayer (r, fpNodes, boolNodes, rmNodes,
+	                                          minRefs);
 	      }
 	      break;
 	      case QF_ABV:

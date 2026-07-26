@@ -107,7 +107,45 @@ public enum SMTNodeKind {
   /* if-then-else on terms */
   ITE("ite", 3),
   UFUNC("extrafun", -1),
-  UPRED("extrapred", -1);
+  UPRED("extrapred", -1),
+  /* floating point operators (SMT-LIB 2 FloatingPoint theory).  These are
+   * appended at the end of the enum so that the EnumSet.range selections
+   * used by the bit-vector, arithmetic and array layers are unaffected.
+   * The arity recorded here does NOT count the leading RoundingMode
+   * argument of fp.add, fp.sub, fp.mul, fp.div, fp.fma, fp.sqrt and
+   * fp.roundToIntegral; FuzzSMT.fpNeedsRoundingMode identifies those.
+   *
+   * FP_ABS..FP_MAX are the term operators and must stay contiguous: the
+   * floating point term layer selects them via
+   * EnumSet.range(FP_ABS, FP_MAX). */
+  FP_ABS("fp.abs", 1),
+  FP_NEG("fp.neg", 1),
+  FP_SQRT("fp.sqrt", 1),
+  FP_ROUND_TO_INTEGRAL("fp.roundToIntegral", 1),
+  FP_ADD("fp.add", 2),
+  FP_SUB("fp.sub", 2),
+  FP_MUL("fp.mul", 2),
+  FP_DIV("fp.div", 2),
+  FP_REM("fp.rem", 2),
+  FP_MIN("fp.min", 2),
+  FP_MAX("fp.max", 2),
+  FP_FMA("fp.fma", 3),
+  /* FP_LEQ..FP_IS_POSITIVE are the predicates, likewise contiguous: the
+   * floating point predicate layer selects them via
+   * EnumSet.range(FP_LEQ, FP_IS_POSITIVE).  fp.eq is IEEE 754 equality,
+   * which is not the same as the core = on floating point terms. */
+  FP_LEQ("fp.leq", 2),
+  FP_LT("fp.lt", 2),
+  FP_GEQ("fp.geq", 2),
+  FP_GT("fp.gt", 2),
+  FP_EQ("fp.eq", 2),
+  FP_IS_NORMAL("fp.isNormal", 1),
+  FP_IS_SUBNORMAL("fp.isSubnormal", 1),
+  FP_IS_ZERO("fp.isZero", 1),
+  FP_IS_INFINITE("fp.isInfinite", 1),
+  FP_IS_NAN("fp.isNaN", 1),
+  FP_IS_NEGATIVE("fp.isNegative", 1),
+  FP_IS_POSITIVE("fp.isPositive", 1);
 
   protected String smtlib1_name;
   protected String smtlib2_name;

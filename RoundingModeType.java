@@ -17,43 +17,20 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-import java.util.*;
+/* The 0-ary RoundingMode sort of the SMT-LIB 2 FloatingPoint theory.
+ * Its only terms are the five rounding mode constants and free constants
+ * declared to be of this sort.
+ */
+public class RoundingModeType extends SMTType {
 
-public enum SMTLogic
-{
-  QF_A,
-  QF_AX,
-  QF_BV,
-  QF_ABV,
-  QF_AUFBV,
-  QF_AUFLIA,
-  QF_FP,
-  QF_IDL,
-  QF_LIA,
-  QF_LRA,
-  QF_NIA,
-  QF_NRA,
-  QF_RDL,
-  QF_UF,
-  QF_UFBV,
-  QF_UFIDL,
-  QF_UFLIA,
-  QF_UFLRA,
-  QF_UFNIA,
-  QF_UFNRA,
-  QF_UFRDL,
-  AUFLIA,
-  AUFLIRA,
-  LRA,
-  AUFNIRA;
-  
-  public final static HashMap<String, SMTLogic> stringToLogic;
+  public final static RoundingModeType roundingModeType =
+    new RoundingModeType();
 
-  static {
-    EnumSet<SMTLogic> set = EnumSet.range (QF_A, AUFNIRA);
-    stringToLogic = new HashMap<String, SMTLogic>(AUFNIRA.ordinal());
-    for (SMTLogic logic : set)
-      stringToLogic.put (logic.toString(), logic);
+  private RoundingModeType() {}
+
+  public String toString (boolean smtlib1) {
+    assert (!smtlib1); /* SMT-LIB 1 has no floating point theory */
+    return "RoundingMode";
   }
 
 }
