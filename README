@@ -163,10 +163,30 @@ Changes in 0.33
 * Floating point exists only in SMT-LIB 2, so -smtlib1 together with any of
   the floating point logics is rejected rather than silently ignored.
 
+* distinct is now generated wherever = between terms of the same sort is,
+  and with 2 to -nary operands rather than always two. It reaches arrays,
+  which it did not before: QF_ABV and QF_AUFBV only ever compared arrays
+  with =, and QF_A and QF_AX only ever compared them two at a time. An
+  n-ary distinct over arrays makes a solver reason about how many distinct
+  arrays a sort can hold, e.g. five pairwise distinct
+  (Array (_ BitVec 1) (_ BitVec 1)) terms are unsatisfiable by pigeonhole.
+  Operands are sampled without repetition, since a distinct naming the same
+  term twice is false whatever else it lists.
+* Array distinct needs extensionality just as array = does, so it is
+  generated only when -mxn/-Mxn ask for array comparisons. Those still
+  default to 0, which keeps the output usable by solvers without
+  extensionality.
+* A parenthesis was missing from the bit-vector array extensionality layer,
+  so every instance generated with -mxn/-Mxn above 0 was unbalanced and no
+  parser would take it. The layer had never run before, since the options
+  default to 0.
+
 Limitations
 -----------
 * No QF_UFFPDTNIRA: it needs algebraic datatypes, which are not generated
   for any logic.
+* A binary distinct may name the same term twice, i.e. be trivially false.
+  Only the n-ary form samples without repetition.
 * The arrays in QF_ABVFP, QF_ABVFPLRA and QF_AUFBVFP are bit-vector indexed
   arrays of bit-vectors. Arrays with floating point elements are not
   generated.

@@ -1564,8 +1564,9 @@ public class FuzzSMT {
   private static int generateBVArrayExtBVLayer (Random r, List<SMTNode> arrays, 
                                                 List<SMTNode> bvs, int numExt) {
 
-    SMTNode a1, a2;
-    int oldSize, sizeArrays;
+    int oldSize, nary;
+    SMTNodeKind kind;
+    List<SMTNode> operands;
     String name;
     StringBuilder builder;
 
@@ -1577,21 +1578,24 @@ public class FuzzSMT {
 
     builder = new StringBuilder();
     oldSize = bvs.size();
-    sizeArrays = arrays.size();
     for (int i = 0; i < numExt; i++) {
       name = letName();
-      do {
-        a1 = arrays.get(r.nextInt(sizeArrays));
-        a2 = arrays.get(r.nextInt(sizeArrays));
-        assert (a1.getType() instanceof BVArrayType);
-        assert (a2.getType() instanceof BVArrayType);
-      } while (!a1.getType().equals(a2.getType()));
+      kind = r.nextBoolean() ? SMTNodeKind.DISTINCT : SMTNodeKind.EQ;
+      nary = 2;
+      if (kind == SMTNodeKind.DISTINCT && !smtlib1)
+        nary = 2 + r.nextInt (maxNary - 1);
+      operands = selectSameSortArrays (r, arrays, nary,
+                                       kind == SMTNodeKind.DISTINCT);
+      if (kind == SMTNodeKind.DISTINCT && operands.get(0) == operands.get(1))
+        kind = SMTNodeKind.EQ;
       builder.append (letStart());
       builder.append (name);
-      builder.append (" (ite (= ");
-      builder.append (a1.getName());
-      builder.append (" ");
-      builder.append (a2.getName());
+      builder.append (" (ite (");
+      builder.append (kind.getString(smtlib1));
+      for (int j = 0; j < operands.size(); j++) {
+        builder.append (" ");
+        builder.append (operands.get(j).getName());
+      }
       builder.append (")"+oneBit() +" " +zeroBit());
       builder.append (")");
       builder.append (letClose());
@@ -3336,6 +3340,8 @@ public class FuzzSMT {
     UPred uPred;
     Signature sig;
     List<SMTType> operandTypes;
+    List<SMTNode> chosen;
+    int nary;
 
     assert (r != null);
     assert (nodes != null);
@@ -3410,15 +3416,33 @@ public class FuzzSMT {
           updateNodeRefs (todoNodes, n2, minRefs);
         }
       } else {
+        /* distinct is variadic, so emit 2..maxNary operands rather than
+         * always two.  The operands are sampled without repetition: a
+         * distinct that mentions the same term twice is false whatever else
+         * it says, and would waste the node.  There is no pigeonhole
+         * problem of the kind the Boolean layer has, since these sorts hold
+         * more than two values, so no rarity limit is needed.  = stays
+         * binary, and SMT-LIB 1 gets the binary form of both. */
+        nary = 2;
+        if (kind == SMTNodeKind.DISTINCT && !smtlib1)
+          nary = 2 + r.nextInt (maxNary - 1);
+        chosen = new ArrayList<SMTNode>();
+        chosen.add (n1);
+        for (int i = 0; chosen.size() < nary && i < 4 * nary; i++) {
+          n2 = nodes.get(r.nextInt(sizeNodes));
+          assert (n1.getType() == n2.getType());
+          if (kind == SMTNodeKind.DISTINCT && chosen.contains (n2))
+            continue; /* would make the distinct trivially false */
+          chosen.add (n2);
+        }
+        while (chosen.size() < 2) /* too few terms of this sort to vary */
+          chosen.add (n1);
         builder.append (kind.getString(smtlib1));
-        builder.append (" ");
-        n2 = nodes.get(r.nextInt(sizeNodes));
-        assert (n1.getType() == n2.getType());
-        builder.append (n1.getName());
-        builder.append (" ");
-        builder.append (n2.getName());
-        updateNodeRefs (todoNodes, n1, minRefs);
-        updateNodeRefs (todoNodes, n2, minRefs);
+        for (int i = 0; i < chosen.size(); i++) {
+          builder.append (" ");
+          builder.append (chosen.get(i).getName());
+          updateNodeRefs (todoNodes, chosen.get(i), minRefs);
+        }
       }
       builder.append (")");
       builder.append (letClose());
@@ -3814,10 +3838,52 @@ public class FuzzSMT {
     return generated;
   }
 
-  static int addArrayExt (Random r, List<SMTNode> arrays, 
+  /* Pick the operands of an array = or distinct.  They all have to have the
+   * same sort, and for distinct they are sampled without repetition, since a
+   * distinct naming the same array twice is false however many other arrays
+   * it lists.  Fewer than the requested number are returned when the sort
+   * does not have enough terms; two of the same term is the last resort, as
+   * the layer has always done for =. */
+  private static List<SMTNode> selectSameSortArrays (Random r,
+                                                     List<SMTNode> arrays,
+                                                     int numOperands,
+                                                     boolean noRepetition){
+    SMTNode a1;
+    List<SMTNode> candidates, chosen;
+
+    assert (r != null);
+    assert (arrays != null);
+    assert (!arrays.isEmpty());
+    assert (numOperands >= 2);
+
+    a1 = arrays.get (r.nextInt (arrays.size()));
+    assert (a1.getType() instanceof ArrayType);
+    candidates = new ArrayList<SMTNode>();
+    for (int i = 0; i < arrays.size(); i++) {
+      SMTNode a2 = arrays.get(i);
+      assert (a2.getType() instanceof ArrayType);
+      if (a2 != a1 && a2.getType().equals (a1.getType()))
+        candidates.add (a2);
+    }
+
+    chosen = new ArrayList<SMTNode>();
+    chosen.add (a1);
+    while (chosen.size() < numOperands && !candidates.isEmpty()) {
+      SMTNode a2 = candidates.get (r.nextInt (candidates.size()));
+      if (noRepetition)
+        candidates.remove (a2);
+      chosen.add (a2);
+    }
+    while (chosen.size() < 2)
+      chosen.add (a1);
+    return chosen;
+  }
+
+  static int addArrayExt (Random r, List<SMTNode> arrays,
                           List<SMTNode> boolNodes, int numExt){
-    int oldSize, sizeArrays;
-    SMTNode a1, a2;
+    int oldSize, nary;
+    SMTNodeKind kind;
+    List<SMTNode> operands;
     String name;
     StringBuilder builder;
 
@@ -3829,21 +3895,27 @@ public class FuzzSMT {
 
     builder = new StringBuilder();
     oldSize = boolNodes.size();
-    sizeArrays = arrays.size();
     for (int i = 0; i < numExt; i++) {
       name = fletName();
-      do {
-        a1 = arrays.get(r.nextInt(sizeArrays));
-        a2 = arrays.get(r.nextInt(sizeArrays));
-        assert (a1.getType() instanceof ArrayType);
-        assert (a2.getType() instanceof ArrayType);
-      } while (!a1.getType().equals(a2.getType()));
+      /* distinct over arrays needs extensionality just as = does, so it
+       * belongs here behind -mxn/-Mxn rather than anywhere unconditional */
+      kind = r.nextBoolean() ? SMTNodeKind.DISTINCT : SMTNodeKind.EQ;
+      nary = 2;
+      if (kind == SMTNodeKind.DISTINCT && !smtlib1)
+        nary = 2 + r.nextInt (maxNary - 1);
+      operands = selectSameSortArrays (r, arrays, nary,
+                                       kind == SMTNodeKind.DISTINCT);
+      /* two of the same array would make the distinct trivially false */
+      if (kind == SMTNodeKind.DISTINCT && operands.get(0) == operands.get(1))
+        kind = SMTNodeKind.EQ;
       builder.append (fletStart());
       builder.append (name);
-      builder.append (" (= ");
-      builder.append (a1.getName());
-      builder.append (" ");
-      builder.append (a2.getName());
+      builder.append (" (");
+      builder.append (kind.getString(smtlib1));
+      for (int j = 0; j < operands.size(); j++) {
+        builder.append (" ");
+        builder.append (operands.get(j).getName());
+      }
       builder.append (")");
       builder.append (letClose());
       boolNodes.add (new SMTNode (BoolType.boolType, name));
@@ -4252,8 +4324,10 @@ public class FuzzSMT {
 "  -Mr <reads>          use max <reads> reads                  (default  5)\n" +
 "  -mw <writes>         use min <writes> writes                (default  0)\n" +
 "  -Mw <writes>         use max <writes> writes                (default  5)\n" +
-"  -mxn <n>             compare min <n> arrays for equality    (default  0)\n" +
-"  -Mxn <n>             compare max <n> arrays for equality    (default  0)\n" +
+"  -mxn <n>             compare min <n> arrays with = or distinct(default  0)\n" +
+"  -Mxn <n>             compare max <n> arrays with = or distinct(default  0)\n" +
+"                       needs extensionality; an n-ary distinct honours\n" +
+"                       -nary\n" +
 "  -mbw <bw>            set min bit-width to <bw>              (default  1)\n" +
 "  -Mbw <bw>            set max bit-width to <bw>              (default 16)\n" +
 "  -mf <funcs>          use min <funcs> uninterpreted BV funcs (default  0)\n" +
@@ -4281,8 +4355,10 @@ public class FuzzSMT {
 "  -Mr <reads>          use max <reads> reads                  (default  5)\n" +
 "  -mw <writes>         use min <writes> writes                (default  0)\n" +
 "  -Mw <writes>         use max <writes> writes                (default  5)\n" +
-"  -mxn <n>             compare min <n> arrays for equality    (default  0)\n" +
-"  -Mxn <n>             compare max <n> arrays for equality    (default  0)\n" +
+"  -mxn <n>             compare min <n> arrays with = or distinct(default  0)\n" +
+"  -Mxn <n>             compare max <n> arrays with = or distinct(default  0)\n" +
+"                       needs extensionality; an n-ary distinct honours\n" +
+"                       -nary\n" +
 "  -mbw <bw>            set min bit-width to <bw>              (default  1)\n" +
 "  -Mbw <bw>            set max bit-width to <bw>              (default 16)\n" +
 "  -ma <args>           set min number of arguments to <args>  (default  1)\n" +
