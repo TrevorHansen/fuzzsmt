@@ -551,6 +551,119 @@ public class FuzzSMT {
     return numArrays;
   }
 
+  /* The floating-point sorts that occur in the given nodes, each once. */
+  private static List<FPType> distinctFPTypes (List<SMTNode> nodes){
+    ArrayList<FPType> types = new ArrayList<FPType>();
+
+    assert (nodes != null);
+
+    for (int i = 0; i < nodes.size(); i++) {
+      SMTType cur = nodes.get(i).getType();
+      if (cur instanceof FPType && !types.contains (cur))
+        types.add ((FPType) cur);
+    }
+    return types;
+  }
+
+  /* A term of exactly the given floating-point sort.  The fp operators need
+   * no such search -- they impose one operand's sort on the others -- but an
+   * array's index and element sorts are fixed by its declaration, and there
+   * is no adaptBW for floating point: converting would round.  Callers
+   * guarantee a term exists by drawing array sorts from the sorts the
+   * declared variables already use. */
+  private static SMTNode selectFPNodeOfType (Random r, List<SMTNode> fps,
+                                             FPType type){
+    ArrayList<SMTNode> matches = new ArrayList<SMTNode>();
+
+    assert (r != null);
+    assert (fps != null);
+    assert (type != null);
+
+    for (int i = 0; i < fps.size(); i++)
+      if (fps.get(i).getType().equals (type))
+        matches.add (fps.get(i));
+    assert (!matches.isEmpty());
+    return matches.get (r.nextInt (matches.size()));
+  }
+
+  /* Array variables for the logics that mix arrays with floating point:
+   * each side of the array sort is drawn independently as a bit-vector or
+   * as one of the floating-point sorts in fpSorts, so the read and write
+   * layers always have terms of the exact sort to hand.  A draw where both
+   * sides come out bit-vector keeps its BVArrayType, making those arrays
+   * exactly the ones the bit-vector logics generate. */
+  private static int generateABVFPArrayVars (Random r, List<SMTNode> nodes,
+                                             int numArrays, int minBW,
+                                             int maxBW, List<FPType> fpSorts) {
+    String name;
+    SMTType indexType, elementType, type;
+    StringBuilder builder;
+
+    assert (r != null);
+    assert (nodes != null);
+    assert (numArrays > 0);
+    assert (minBW > 0);
+    assert (maxBW >= minBW);
+    assert (fpSorts != null);
+    assert (!fpSorts.isEmpty());
+    assert (!smtlib1);
+
+    builder = new StringBuilder();
+    for (int i = 0; i < numArrays; i++) {
+      if (r.nextBoolean())
+        indexType = new BVType (selectRandValRange (r, minBW, maxBW));
+      else
+        indexType = fpSorts.get (r.nextInt (fpSorts.size()));
+      if (r.nextBoolean())
+        elementType = new BVType (selectRandValRange (r, minBW, maxBW));
+      else
+        elementType = fpSorts.get (r.nextInt (fpSorts.size()));
+      if (indexType instanceof BVType && elementType instanceof BVType)
+        type = new BVArrayType (((BVType) indexType).getWidth(),
+                                ((BVType) elementType).getWidth());
+      else
+        type = new MixedArrayType (indexType, elementType);
+      name = "a" + SMTNode.getNodeCtr();
+      builder.append ("(declare-fun ");
+      builder.append (name);
+      builder.append (" () (Array ");
+      builder.append (indexType.toString (false));
+      builder.append (" ");
+      builder.append (elementType.toString (false));
+      builder.append ("))\n");
+      nodes.add (new SMTNode (type, name));
+    }
+    output.print (builder.toString());
+
+    return numArrays;
+  }
+
+  /* The index and element sorts of an array node, across both array types. */
+  private static SMTType arrayIndexType (SMTNode array){
+    SMTType type = array.getType();
+    if (type instanceof BVArrayType)
+      return new BVType (((BVArrayType) type).getIndexWidth());
+    return ((MixedArrayType) type).getIndexType();
+  }
+
+  private static SMTType arrayElementType (SMTNode array){
+    SMTType type = array.getType();
+    if (type instanceof BVArrayType)
+      return new BVType (((BVArrayType) type).getValWidth());
+    return ((MixedArrayType) type).getElementType();
+  }
+
+  /* A term spelled for one side of an array operation: a bit-vector side
+   * reuses an existing term adapted to the width, a floating-point side
+   * picks a term of exactly that sort. */
+  private static String arraySideTerm (Random r, SMTType sideType,
+                                       List<SMTNode> bvs, List<SMTNode> fps){
+    if (sideType instanceof FPType)
+      return selectFPNodeOfType (r, fps, (FPType) sideType).getName();
+    SMTNode node = bvs.get (r.nextInt (bvs.size()));
+    return adaptBW (r, node, ((BVType) sideType).getWidth());
+  }
+
   private static int generateIntVars (List<SMTNode> nodes, int numVars){
     assert (nodes != null);
     assert (numVars >= 0);
@@ -1473,11 +1586,16 @@ public class FuzzSMT {
     return nodes.size() - oldSize;
   }
 
-  private static int generateBVWriteLayer (Random r, List<SMTNode> arrays, 
-                                           List<SMTNode> bvs, int numWrites){
+  /* The store and select layers of every array logic.  A pure bit-vector
+   * logic has only BVArrayType arrays and never consults fps; the ABVFP
+   * logics also hold MixedArrayType arrays whose index or element side is a
+   * floating-point sort, and a select from such an array lands in the
+   * floating-point pool, where the fp layers pick it up. */
+  private static int generateBVWriteLayer (Random r, List<SMTNode> arrays,
+                                           List<SMTNode> bvs,
+                                           List<SMTNode> fps, int numWrites){
 
-    int aIndexWidth, aValWidth, indexWidth, valWidth;
-    SMTNode array, index, val;
+    SMTNode array;
     String name;
     StringBuilder builder;
 
@@ -1492,38 +1610,30 @@ public class FuzzSMT {
     for (int i = 0; i < numWrites; i++) {
       name = letName();
       array = arrays.get(r.nextInt(arrays.size()));
-      assert (array.getType() instanceof BVArrayType);
-      aIndexWidth = ((BVArrayType) array.getType()).indexWidth;
-      aValWidth = ((BVArrayType) array.getType()).valWidth;
+      assert (array.getType() instanceof ArrayType);
       builder.append (letStart());
       builder.append (name);
       builder.append (" (store ");
       builder.append (array.getName());
       builder.append (" ");
-
-      index = bvs.get(r.nextInt(bvs.size()));
-      assert (index.getType() instanceof BVType);
-      indexWidth = ((BVType) index.getType()).width;
-      val = bvs.get(r.nextInt(bvs.size()));
-      assert (val.getType() instanceof BVType);
-      valWidth = ((BVType) val.getType()).width;
-
-      builder.append (adaptBW (r, index, aIndexWidth));
+      builder.append (arraySideTerm (r, arrayIndexType (array), bvs, fps));
       builder.append (" ");
-      builder.append (adaptBW (r, val, aValWidth));
+      builder.append (arraySideTerm (r, arrayElementType (array), bvs, fps));
       builder.append (")");
       builder.append (letClose());
-      arrays.add (new SMTNode (new BVArrayType (aIndexWidth, aValWidth), name));
+      arrays.add (new SMTNode (array.getType(), name));
     }
     output.print (builder.toString());
     return numWrites;
   }
 
-  private static int generateBVReadLayer (Random r, List<SMTNode> arrays, 
-                                          List<SMTNode> bvs, int numReads){
+  private static int generateBVReadLayer (Random r, List<SMTNode> arrays,
+                                          List<SMTNode> bvs,
+                                          List<SMTNode> fps, int numReads){
 
-    int aIndexWidth, aValWidth, indexWidth, sizeArrays;
-    SMTNode array, index;
+    int sizeArrays;
+    SMTNode array;
+    SMTType elementType;
     String name;
     StringBuilder builder;
 
@@ -1539,23 +1649,20 @@ public class FuzzSMT {
     for (int i = 0; i < numReads; i++) {
       name = letName();
       array = arrays.get(r.nextInt(sizeArrays));
-      assert (array.getType() instanceof BVArrayType);
-      aIndexWidth = ((BVArrayType) array.getType()).indexWidth;
-      aValWidth = ((BVArrayType) array.getType()).valWidth;
+      assert (array.getType() instanceof ArrayType);
+      elementType = arrayElementType (array);
       builder.append (letStart());
       builder.append (name);
       builder.append (" (select ");
       builder.append (array.getName());
       builder.append (" ");
-
-      index = bvs.get(r.nextInt(bvs.size()));
-      assert (index.getType() instanceof BVType);
-      indexWidth = ((BVType) index.getType()).width;
-
-      builder.append (adaptBW (r, index, aIndexWidth));
+      builder.append (arraySideTerm (r, arrayIndexType (array), bvs, fps));
       builder.append (")");
       builder.append (letClose());
-      bvs.add (new SMTNode (new BVType (aValWidth), name));
+      if (elementType instanceof FPType)
+        fps.add (new SMTNode (elementType, name));
+      else
+        bvs.add (new SMTNode (elementType, name));
     }
     output.print (builder.toString());
     return numReads;
@@ -4536,6 +4643,13 @@ public class FuzzSMT {
 "                       fp.to_real cross between the theories\n" +
 "                       -mv -Mv -mc -Mc -mbw -Mbw size the bit-vector or\n" +
 "                       real part, as in the logic it is taken from\n" +
+"  the array logics (QF_ABVFP, QF_ABVFPLRA, QF_AUFBVFP):\n" +
+"                       each side of an array sort is drawn independently\n" +
+"                       as a bit-vector or as a floating-point sort one of\n" +
+"                       the declared variables uses, so selects and stores\n" +
+"                       cross between the theories just as the conversions\n" +
+"                       do; -mar -Mar -mr -Mr -mw -Mw -mxn -Mxn size and\n" +
+"                       equate the arrays, as in QF_ABV\n" +
 "  note: floating point is SMT-LIB 2 only, so -smtlib1 is rejected\n" +
 "\n" +
 "QF_IDL, QF_UFIDL, QF_RDL and QF_UFRDL options:\n" +
@@ -5780,7 +5894,8 @@ public class FuzzSMT {
 	        if (hasBV)
 	          generateBVVars (r, bvNodes, numVars, minBW, maxBW);
 	        if (hasArrays)
-	          generateBVArrayVars (r, arrayNodes, numArrays, minBW, maxBW);
+	          generateABVFPArrayVars (r, arrayNodes, numArrays, minBW, maxBW,
+	                                  distinctFPTypes (fpNodes));
 	        if (hasReal)
 	          generateRealVars (realNodes, numVars);
 	        output.println (startFormula());
@@ -5799,11 +5914,13 @@ public class FuzzSMT {
 	          pars += generateBVLayer (r, bvNodes, minRefs, minBW, maxBW,
 	                                   bvDivMode, BVDivGuards, hasArrays, uFuncs,
 	                                   uPreds);
+	        int lateWrites = (numWrites + 1) >>> 1;
+	        int lateReads = (numReads + 1) >>> 1;
 	        if (hasArrays) {
 	          while (numWrites > 0 || numReads > 0) {
-	            pars += generateBVWriteLayer (r, arrayNodes, bvNodes,
+	            pars += generateBVWriteLayer (r, arrayNodes, bvNodes, fpNodes,
 	                                          (numWrites >>> 1) + (numWrites & 1));
-	            pars += generateBVReadLayer (r, arrayNodes, bvNodes,
+	            pars += generateBVReadLayer (r, arrayNodes, bvNodes, fpNodes,
 	                                         (numReads >>> 1) + (numReads & 1));
 	            numWrites >>>= 1;
 	            numReads >>>= 1;
@@ -5831,6 +5948,17 @@ public class FuzzSMT {
 	                                       minBW, maxBW);
 	        if (hasReal)
 	          pars += generateFPToRealLayer (r, fpNodes, realNodes, numConv);
+
+	        /* one more round over the arrays now that the floating-point layer
+	         * has run, so stores and selects also see floating-point
+	         * *operations* and conversions as indexes and values, and the
+	         * selects over those stores reach the predicate layers below */
+	        if (hasArrays) {
+	          pars += generateBVWriteLayer (r, arrayNodes, bvNodes, fpNodes,
+	                                        lateWrites);
+	          pars += generateBVReadLayer (r, arrayNodes, bvNodes, fpNodes,
+	                                       lateReads);
+	        }
 
 	        pars += generateFPPredicateLayer (r, fpNodes, boolNodes, rmNodes,
 	                                          minRefs);
@@ -5877,11 +6005,11 @@ public class FuzzSMT {
 	         * may also contribute to read indices, write indices and write values.
 	         */
 	        while (numWrites > 0 || numReads > 0 || numExtBV > 0) {
-	          pars += generateBVWriteLayer (r, arrayNodes, bvNodes, 
+	          pars += generateBVWriteLayer (r, arrayNodes, bvNodes, null,
 	                                        (numWrites >>> 1) + (numWrites & 1));
-	          pars += generateBVArrayExtBVLayer (r, arrayNodes, bvNodes, 
+	          pars += generateBVArrayExtBVLayer (r, arrayNodes, bvNodes,
 	                                             (numExtBV >>> 1) + (numExtBV & 1));
-	          pars += generateBVReadLayer (r, arrayNodes, bvNodes, 
+	          pars += generateBVReadLayer (r, arrayNodes, bvNodes, null,
 	                                       (numReads >>> 1) + (numReads & 1));
 	          numWrites >>>= 1;
 	          numExtBV >>>= 1;
