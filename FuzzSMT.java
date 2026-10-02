@@ -5373,9 +5373,9 @@ public class FuzzSMT {
         } else if (arg.equals("-bulk-export")) {
         	bulkExport = parseIntOption (args, i++, 1, "invalid bulk export amount");
         } else if (arg.equals("-bulk-prefix")) {
-		if (i+1 == args.length - 1)
-      			printErrAndExit ("option argument missing");
-        	bulkPrefix = args[++i];
+          if (i == args.length - 1)
+            printErrAndExit ("option argument missing");
+          bulkPrefix = args[++i];
         }
 
         else { 
