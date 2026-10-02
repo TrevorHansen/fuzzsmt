@@ -17,8 +17,15 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+import java.util.ArrayList;
+
 public class SMTNode
 {
+
+  /* While not null, every node constructed is appended here.  FuzzSMT sets
+   * it while it re-runs the layers inside a get-value, so that it can pick
+   * any of the let-bound terms it has just built as the term to ask for. */
+  public static ArrayList<SMTNode> recorded = null;
 
   protected static int nodeCtr = 0;
 
@@ -35,6 +42,8 @@ public class SMTNode
     this.type = type;
     this.name = name;
     nodeCtr++;
+    if (recorded != null)
+      recorded.add (this);
   }
 
   public SMTType getType(){
