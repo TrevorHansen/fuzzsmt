@@ -40,6 +40,22 @@ public class FuzzSMT {
 	static int maxFPSig = 24; // max significand bits when -fp-any is given.
 
 	static String bulkPrefix =""; // Prepend to bulk output.
+	static boolean produceModels = false; // if true, set :produce-models and follow check-sat with get-value and get-model.
+	static ArrayList<SMTNode> declaredConsts = new ArrayList<SMTNode>(); // the zero-arity declarations of the current instance, which -models asks for.
+
+	/* -models re-runs the logic's layers after check-sat, inside a get-value,
+	 * to build a term for the solver to evaluate.  While replaying is set the
+	 * declaring functions print nothing and hand back the symbols declared
+	 * the first time round, in order, from these lists. */
+	static boolean replaying = false;
+	static int declaredConstCursor = 0;
+	static ArrayList<SMTType> declaredSorts = new ArrayList<SMTType>();
+	static int declaredSortCursor = 0;
+	static ArrayList<List<UFunc>> declaredFuncBatches = new ArrayList<List<UFunc>>();
+	static int declaredFuncCursor = 0;
+	static ArrayList<List<UPred>> declaredPredBatches = new ArrayList<List<UPred>>();
+	static int declaredPredCursor = 0;
+	static ArrayList<SMTType> internedTypes = new ArrayList<SMTType>();
 	static java.io.PrintStream output; // where output is written to.
 		
 
@@ -299,11 +315,308 @@ public class FuzzSMT {
   }
 
 /*----------------------------------------------------------------------------*/
+/* Model queries                                                              */
+/*----------------------------------------------------------------------------*/
+
+  /* A declared constant of the same sort as the given one, preferring one
+   * that is not the constant itself when the sort has more than one. */
+  private static SMTNode selectSameSortConst (Random r, List<SMTNode> consts,
+                                              SMTNode node){
+    ArrayList<SMTNode> matches = new ArrayList<SMTNode>();
+
+    assert (r != null);
+    assert (consts != null);
+    assert (node != null);
+
+    for (int i = 0; i < consts.size(); i++) {
+      SMTNode cur = consts.get(i);
+      if (cur != node && cur.getType().equals (node.getType()))
+        matches.add (cur);
+    }
+    if (matches.isEmpty())
+      return node;
+    return matches.get (r.nextInt (matches.size()));
+  }
+
+  /* The index and element sorts of any array sort the logics declare. */
+  private static SMTType indexSortOf (SMTType type){
+    assert (type instanceof ArrayType);
+    if (type instanceof BVArrayType)
+      return new BVType (((BVArrayType) type).getIndexWidth());
+    if (type instanceof MixedArrayType)
+      return ((MixedArrayType) type).getIndexType();
+    if (type instanceof ArrayTypeFromTo)
+      return ((ArrayTypeFromTo) type).getIndexType();
+    assert (type instanceof Array1Type || type instanceof Array2Type);
+    return IntType.intType;
+  }
+
+  private static SMTType elementSortOf (SMTType type){
+    assert (type instanceof ArrayType);
+    if (type instanceof BVArrayType)
+      return new BVType (((BVArrayType) type).getValWidth());
+    if (type instanceof MixedArrayType)
+      return ((MixedArrayType) type).getElementType();
+    if (type instanceof ArrayTypeFromTo)
+      return ((ArrayTypeFromTo) type).getElementType();
+    if (type instanceof Array2Type)
+      return Array1Type.array1Type;
+    assert (type instanceof Array1Type);
+    return RealType.realType;
+  }
+
+  /* A closed term of the given sort for use as an array index: a declared
+   * constant of that sort when there is one, else a zero literal.  An
+   * uninterpreted sort has no literal, so null is returned when no constant
+   * of it was declared. */
+  private static String indexTermOfSort (Random r, SMTType type){
+    ArrayList<SMTNode> matches = new ArrayList<SMTNode>();
+
+    assert (r != null);
+    assert (type != null);
+
+    for (int i = 0; i < declaredConsts.size(); i++)
+      if (declaredConsts.get(i).getType().equals (type))
+        matches.add (declaredConsts.get(i));
+    if (!matches.isEmpty())
+      return matches.get (r.nextInt (matches.size())).getName();
+    if (type instanceof BVType)
+      return "(_ bv0 " + ((BVType) type).getWidth() + ")";
+    if (type instanceof FPType)
+      return "(_ +zero " + ((FPType) type).getExponentBits() + " " +
+             ((FPType) type).getSignificandBits() + ")";
+    if (type == IntType.intType)
+      return "0";
+    if (type == RealType.realType)
+      return "0.0";
+    return null;
+  }
+
+  /* The term get-value asks for in place of a declared constant.  A scalar
+   * is asked for by name.  An array is read at an index, selecting again
+   * while the element is itself an array, because a value for a whole array
+   * is something not every solver will print, while the value of a select is
+   * what a solver has to be able to give.  Arrays over an uninterpreted
+   * index sort with no declared index fall back to the bare name. */
+  private static String queryTerm (Random r, SMTNode node){
+    SMTType type;
+    String term, index;
+
+    assert (r != null);
+    assert (node != null);
+
+    term = node.getName();
+    type = node.getType();
+    while (type instanceof ArrayType) {
+      index = indexTermOfSort (r, indexSortOf (type));
+      if (index == null)
+        return node.getName();
+      term = "(select " + term + " " + index + ")";
+      type = elementSortOf (type);
+    }
+    return term;
+  }
+
+  /* The commands -models puts after check-sat, in random order.  Each entry
+   * is one command, except null, which stands for a get-value whose term is
+   * built by running the logic's layers again (see main).  The plain
+   * get-values ask for every declared constant once, in groups of random
+   * size and order, and compare a few same-sort scalar constants, whose
+   * Boolean has to agree with the values printed for the operands.  Only
+   * declared constants can be asked for by name: the let-bound terms of the
+   * formula are out of scope once the assert closes. */
+  private static ArrayList<String> planModelQueries (Random r, int numTerms,
+                                                     int numGetModels){
+    ArrayList<SMTNode> consts, paired;
+    ArrayList<String> queries;
+    SMTNode a, b;
+    StringBuilder builder;
+    int i, groupSize, numComparisons;
+
+    assert (r != null);
+    assert (numTerms >= 0);
+    assert (numGetModels >= 0);
+    assert (!smtlib1);
+
+    queries = new ArrayList<String>();
+    consts = new ArrayList<SMTNode>(declaredConsts);
+    Collections.shuffle (consts, r);
+
+    i = 0;
+    while (i < consts.size()) {
+      groupSize = Math.min (r.nextInt (4) + 1, consts.size() - i);
+      builder = new StringBuilder ("(get-value (");
+      for (int j = 0; j < groupSize; j++) {
+        if (j > 0)
+          builder.append (" ");
+        builder.append (queryTerm (r, consts.get(i + j)));
+      }
+      builder.append ("))");
+      queries.add (builder.toString());
+      i += groupSize;
+    }
+
+    /* compare scalar constants that share a sort with another where
+     * possible, so the comparison is not of a constant with itself.  Whole
+     * arrays are left out: deciding their equality is a feature not every
+     * solver has, and the array-equality layer covers it where it does. */
+    paired = new ArrayList<SMTNode>();
+    for (int k = 0; k < consts.size(); k++)
+      if (!(consts.get(k).getType() instanceof ArrayType) &&
+          selectSameSortConst (r, consts, consts.get(k)) != consts.get(k))
+        paired.add (consts.get(k));
+    if (paired.isEmpty())
+      for (int k = 0; k < consts.size(); k++)
+        if (!(consts.get(k).getType() instanceof ArrayType))
+          paired.add (consts.get(k));
+
+    numComparisons = Math.min (4, paired.size());
+    for (int k = 0; k < numComparisons; k++) {
+      a = paired.get (r.nextInt (paired.size()));
+      b = selectSameSortConst (r, consts, a);
+      queries.add ("(get-value ((" + (r.nextBoolean() ? "= " : "distinct ") +
+                   a.getName() + " " + b.getName() + ")))");
+    }
+
+    for (int k = 0; k < numGetModels; k++)
+      queries.add ("(get-model)");
+    for (int k = 0; k < numTerms; k++)
+      queries.add (null);
+    Collections.shuffle (queries, r);
+    return queries;
+  }
+
+  /* The term a replayed get-value asks for: any term built in the replay,
+   * or any declared constant, other than an array, since not every solver
+   * prints a value for a whole array.  Every let the replay opened is still
+   * open where the term is printed, so every name is in scope. */
+  private static SMTNode selectQueryTerm (Random r){
+    ArrayList<SMTNode> candidates = new ArrayList<SMTNode>();
+
+    assert (r != null);
+    assert (replaying);
+    assert (SMTNode.recorded != null);
+
+    for (int i = 0; i < SMTNode.recorded.size(); i++)
+      if (!(SMTNode.recorded.get(i).getType() instanceof ArrayType))
+        candidates.add (SMTNode.recorded.get(i));
+    for (int i = 0; i < declaredConsts.size(); i++)
+      if (!(declaredConsts.get(i).getType() instanceof ArrayType))
+        candidates.add (declaredConsts.get(i));
+    assert (!candidates.isEmpty());
+    return candidates.get (r.nextInt (candidates.size()));
+  }
+
+  /* Bookkeeping for the replays: cleared per instance, cursors reset per
+   * replay. */
+  private static void clearDeclarations (){
+    replaying = false;
+    declaredConsts.clear();
+    declaredSorts.clear();
+    declaredFuncBatches.clear();
+    declaredPredBatches.clear();
+    internedTypes.clear();
+    declaredConstCursor = 0;
+    declaredSortCursor = 0;
+    declaredFuncCursor = 0;
+    declaredPredCursor = 0;
+    SMTNode.recorded = null;
+  }
+
+  private static void startReplay (){
+    replaying = true;
+    declaredConstCursor = 0;
+    declaredSortCursor = 0;
+    declaredFuncCursor = 0;
+    declaredPredCursor = 0;
+    SMTNode.recorded = new ArrayList<SMTNode>();
+  }
+
+  /* The replay counterpart of the constant declarers: the next n constants
+   * declared the first time round, in order.  Each declarer declares a
+   * count fixed per instance, so the cursor stays in step. */
+  private static int reuseDeclaredConsts (List<SMTNode> nodes, int n){
+    assert (replaying);
+    assert (nodes != null);
+    assert (declaredConstCursor + n <= declaredConsts.size());
+    for (int i = 0; i < n; i++)
+      nodes.add (declaredConsts.get (declaredConstCursor++));
+    return n;
+  }
+
+  /* The function and predicate declarers draw how many they declare, so a
+   * replay cannot know the count: each call records what it declared as a
+   * batch, and the replay hands the batches back in order. */
+  private static void recordFuncBatch (List<UFunc> funcs, int oldSize){
+    assert (!replaying);
+    declaredFuncBatches.add (
+      new ArrayList<UFunc>(funcs.subList (oldSize, funcs.size())));
+  }
+
+  private static int reuseFuncBatch (List<UFunc> funcs){
+    List<UFunc> batch;
+    assert (replaying);
+    assert (declaredFuncCursor < declaredFuncBatches.size());
+    batch = declaredFuncBatches.get (declaredFuncCursor++);
+    funcs.addAll (batch);
+    return batch.size();
+  }
+
+  private static void recordPredBatch (List<UPred> preds, int oldSize){
+    assert (!replaying);
+    declaredPredBatches.add (
+      new ArrayList<UPred>(preds.subList (oldSize, preds.size())));
+  }
+
+  private static int reusePredBatch (List<UPred> preds){
+    List<UPred> batch;
+    assert (replaying);
+    assert (declaredPredCursor < declaredPredBatches.size());
+    batch = declaredPredBatches.get (declaredPredCursor++);
+    preds.addAll (batch);
+    return batch.size();
+  }
+
+  /* The sort objects a logic case makes for itself.  The layers compare
+   * sorts by identity, so a replay has to use the very objects the declared
+   * constants carry: the first call with a given sort keeps it, and later
+   * calls with the same sort hand the kept one back.  Sameness is by class
+   * and printed form rather than an equals of the sort classes: the layers
+   * also draw from hash maps keyed on nodes, whose order follows the
+   * identity hash codes, and giving the sort classes hash codes of their
+   * own shifts those and with them the formula a seed produces. */
+  private static SMTType internType (SMTType type){
+    SMTType kept;
+    assert (type != null);
+    for (int i = 0; i < internedTypes.size(); i++) {
+      kept = internedTypes.get(i);
+      if (kept.getClass() == type.getClass() &&
+          kept.toString (false).equals (type.toString (false)))
+        return kept;
+    }
+    assert (!replaying);
+    internedTypes.add (type);
+    return type;
+  }
+
+/*----------------------------------------------------------------------------*/
 /* Input Layer                                                                */
 /*----------------------------------------------------------------------------*/
 
+  /* Every zero-arity declaration goes through here so that -models can ask
+   * for its value after check-sat.  Uninterpreted functions and predicates
+   * with arguments are not recorded: get-value takes terms, not functions. */
+  private static void addDeclaredConst (List<SMTNode> nodes, SMTNode node){
+    assert (nodes != null);
+    assert (node != null);
+    nodes.add (node);
+    declaredConsts.add (node);
+  }
+
   private static int generateVarsOfOneType (List<SMTNode> nodes, int numVars, 
                                             SMTType type){
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numVars);
     String name;
     StringBuilder builder;
 
@@ -331,7 +644,7 @@ public class FuzzSMT {
 	      builder.append (")\n");
       }
       
-      nodes.add (new SMTNode (type, name));
+      addDeclaredConst (nodes, new SMTNode (type, name));
     }
     output.print (builder.toString());
     return numVars;
@@ -340,6 +653,8 @@ public class FuzzSMT {
 
   private static int generateBVVars (Random r, List<SMTNode> nodes, int numVars,
                                      int minBW, int maxBW) {
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numVars);
     int bw;
     String name;
     SMTNode node;
@@ -374,7 +689,7 @@ public class FuzzSMT {
 	      builder.append ("))\n");
       }
       node = new SMTNode (new BVType (bw), name);
-      nodes.add (node);
+      addDeclaredConst (nodes, node);
     }
     output.print (builder.toString());
 
@@ -503,6 +818,8 @@ public class FuzzSMT {
   
   private static int generateBVArrayVars (Random r, List<SMTNode> nodes,
                                           int numArrays, int minBW, int maxBW) {
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numArrays);
     int indexWidth, valWidth;
     String name;
     SMTNode node;
@@ -544,7 +861,7 @@ public class FuzzSMT {
       }
       
       node = new SMTNode (new BVArrayType (indexWidth, valWidth), name);
-      nodes.add (node);
+      addDeclaredConst (nodes, node);
     }
     output.print (builder.toString());
 
@@ -595,6 +912,8 @@ public class FuzzSMT {
   private static int generateABVFPArrayVars (Random r, List<SMTNode> nodes,
                                              int numArrays, int minBW,
                                              int maxBW, List<FPType> fpSorts) {
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numArrays);
     String name;
     SMTType indexType, elementType, type;
     StringBuilder builder;
@@ -631,7 +950,7 @@ public class FuzzSMT {
       builder.append (" ");
       builder.append (elementType.toString (false));
       builder.append ("))\n");
-      nodes.add (new SMTNode (type, name));
+      addDeclaredConst (nodes, new SMTNode (type, name));
     }
     output.print (builder.toString());
 
@@ -796,6 +1115,11 @@ public class FuzzSMT {
   }
 
   private static int generateUTypes (List<SMTType> types, int numUTypes){
+    if (replaying) {
+      for (int i = 0; i < numUTypes; i++)
+        types.add (declaredSorts.get (declaredSortCursor++));
+      return numUTypes;
+    }
     String name;
     StringBuilder builder;
 
@@ -806,6 +1130,7 @@ public class FuzzSMT {
     for (int i = 0; i < numUTypes; i++) {
       name = "S" + i;
       types.add (new UType (name));
+      declaredSorts.add (types.get (types.size() - 1));
 
       if (smtlib1)
       {
@@ -845,6 +1170,9 @@ public class FuzzSMT {
   private static int generateUFuncs (Random r, List<SMTType> sorts, 
                                      List<UFunc> funcs, int minNumFuncs, 
                                      int minArgs, int maxArgs) {
+    if (replaying)
+      return reuseFuncBatch (funcs);
+    int oldSizeDecl = funcs.size();
     int generated = 0;
     int numArgs, sizeSorts;
     Signature sig;
@@ -924,6 +1252,7 @@ public class FuzzSMT {
       
       generated++;
     }
+    recordFuncBatch (funcs, oldSizeDecl);
     output.print (builder.toString());
     assert (generated > 0);
     return generated;
@@ -932,6 +1261,9 @@ public class FuzzSMT {
   private static int generateUPreds (Random r, List<SMTType> sorts, 
                                      List<UPred> preds, int minNumPreds, 
                                      int minArgs, int maxArgs) {
+    if (replaying)
+      return reusePredBatch (preds);
+    int oldSizeDecl = preds.size();
     int generated = 0;
     int numArgs, sizeSorts;
     Signature sig;
@@ -995,6 +1327,7 @@ public class FuzzSMT {
       
       generated++;
     }
+    recordPredBatch (preds, oldSizeDecl);
     output.print (builder.toString());
     assert (generated > 0);
     return generated;
@@ -1003,6 +1336,9 @@ public class FuzzSMT {
   private static int generateUFuncsBV (Random r, List<UFunc> funcs, 
                                        int numFuncs, int minArgs, int maxArgs,
                                        int minBW, int maxBW) {
+    if (replaying)
+      return reuseFuncBatch (funcs);
+    int oldSizeDecl = funcs.size();
     int numArgs, bw;
     Signature sig;
     ArrayList<SMTType> operandTypes;
@@ -1066,6 +1402,7 @@ public class FuzzSMT {
     	  
       
     }
+    recordFuncBatch (funcs, oldSizeDecl);
     output.print (builder.toString());
     return numFuncs;
   }
@@ -1073,6 +1410,9 @@ public class FuzzSMT {
   private static int generateUPredsBV (Random r, List<UPred> preds, 
                                        int numPreds, int minArgs, int maxArgs,
                                        int minBW, int maxBW) {
+    if (replaying)
+      return reusePredBatch (preds);
+    int oldSizeDecl = preds.size();
     int numArgs, bw;
     Signature sig;
     ArrayList<SMTType> operandTypes;
@@ -1127,6 +1467,7 @@ public class FuzzSMT {
       }
 
     }
+    recordPredBatch (preds, oldSizeDecl);
     output.print (builder.toString());
     return numPreds;
   }
@@ -2688,6 +3029,8 @@ public class FuzzSMT {
 
   private static int generateFPVars (Random r, List<SMTNode> nodes,
                                      int numVars){
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numVars);
     String name;
     FPType type;
     StringBuilder builder;
@@ -2706,7 +3049,7 @@ public class FuzzSMT {
       builder.append (" () ");
       builder.append (fpSortString (r, type));
       builder.append (")\n");
-      nodes.add (new SMTNode (type, name));
+      addDeclaredConst (nodes, new SMTNode (type, name));
     }
     output.print (builder.toString());
 
@@ -2715,6 +3058,8 @@ public class FuzzSMT {
 
   private static int generateRoundingModeVars (Random r, List<SMTNode> nodes,
                                                int numVars){
+    if (replaying)
+      return reuseDeclaredConsts (nodes, numVars);
     String name;
     StringBuilder builder;
 
@@ -2729,7 +3074,8 @@ public class FuzzSMT {
       builder.append ("(declare-fun ");
       builder.append (name);
       builder.append (" () RoundingMode)\n");
-      nodes.add (new SMTNode (RoundingModeType.roundingModeType, name));
+      addDeclaredConst (nodes,
+                        new SMTNode (RoundingModeType.roundingModeType, name));
     }
     output.print (builder.toString());
 
@@ -4040,6 +4386,8 @@ public class FuzzSMT {
                                            int maxQVars, int minQNestings, 
                                            int maxQNestings, boolean onlyEqComp,
                                            int minRefs) {
+    if (replaying)
+      return;
 
     int qVarCounter = 0;
     int nodeCounter = 0;
@@ -4345,6 +4693,8 @@ public class FuzzSMT {
   
   private static String startFormula()
   {
+	  if (replaying)
+		  return "(get-value (";
 	  if (smtlib1)
 		  return ":formula";
 	  else
@@ -4400,6 +4750,16 @@ public class FuzzSMT {
 "  -bulk-export <num>   create <num> instances in the current directory\n"+
 "\n" +
 "  -bulk-prefix <string> prepend the string prefix to the file names created\n"+
+"  -models              set :produce-models and follow check-sat with model\n" +
+"                       commands in random order: get-value over the\n" +
+"                       declared constants, get-value of terms built like\n" +
+"                       the formula from its operators, and get-model;\n" +
+"                       SMT-LIB 2 only.  The status is unknown, so expect\n" +
+"                       an error reply from a solver that answers unsat\n" +
+"  -mgv <num>           use min <num> built get-value terms   (default  0)\n" +
+"  -Mgv <num>           use max <num> built get-value terms   (default  3)\n" +
+"  -mgm <num>           use min <num> get-model commands      (default  0)\n" +
+"  -Mgm <num>           use max <num> get-model commands      (default  2)\n" +
 "  -bool-random         generate a random boolean layer (default)\n" +
 "  -bool-and            use an n-ary AND for the boolean layer\n" +
 "  -bool-or             use an n-ary OR for the boolean layer\n" +
@@ -4710,6 +5070,10 @@ public class FuzzSMT {
 	SMTLogic logic = null;
     Random r = null;
     int pars = 1;
+    int minNumModelTerms = 0;
+    int maxNumModelTerms = 3;
+    int minNumGetModels = 0;
+    int maxNumGetModels = 2;
     int minRefs = 1;
     int minNumConsts = 1;
     int maxNumConsts = 1;
@@ -5370,6 +5734,16 @@ public class FuzzSMT {
           maxBW = parseIntOption (args, i++, 1, "invalid maximum bit-width");
         } else if (arg.equals("-smtlib1")) {
         	smtlib1 = true;
+        } else if (arg.equals("-models")) {
+        	produceModels = true;
+        } else if (arg.equals("-mgv")) {
+          minNumModelTerms = parseIntOption (args, i++, 0, "invalid minimum number of get-value terms");
+        } else if (arg.equals("-Mgv")) {
+          maxNumModelTerms = parseIntOption (args, i++, 0, "invalid maximum number of get-value terms");
+        } else if (arg.equals("-mgm")) {
+          minNumGetModels = parseIntOption (args, i++, 0, "invalid minimum number of get-model commands");
+        } else if (arg.equals("-Mgm")) {
+          maxNumGetModels = parseIntOption (args, i++, 0, "invalid maximum number of get-model commands");
         } else if (arg.equals("-bulk-export")) {
         	bulkExport = parseIntOption (args, i++, 1, "invalid bulk export amount");
         } else if (arg.equals("-bulk-prefix")) {
@@ -5392,11 +5766,18 @@ public class FuzzSMT {
       printErrAndExit ("floating point logics cannot be output in SMT-LIB 1 "
                        + "format");
 
+    /* SMT-LIB 1 has no get-value or get-model */
+    if (smtlib1 && produceModels)
+      printErrAndExit ("-models cannot be combined with -smtlib1");
+    checkMinMax (minNumModelTerms, maxNumModelTerms, "get-value terms");
+    checkMinMax (minNumGetModels, maxNumGetModels, "get-model commands");
+
     if (r == null) /* seed has not been set */
 	      r = new Random();
     
     for (int fileId =0; fileId < Math.max(bulkExport,1);fileId++)
     {
+	    clearDeclarations();
 	    if (bulkExport ==0)
 	    	output = System.out;
 	    else
@@ -5833,10 +6214,49 @@ public class FuzzSMT {
 	    }
 	    else
 	    {
+			if (produceModels)
+				output.println("(set-option :produce-models true)");
 			output.println("(set-info :source | fuzzsmt "+ version +" |)");
 			output.println("(set-logic  " + logic.toString() + ")");
 			output.println("(set-info :status unknown)");
 	    }
+
+	    /* -models: after the formula and its check-sat the layers run again,
+	     * once per get-value term, each run inside a get-value in place of the
+	     * assert and over the constants already declared, interleaved with the
+	     * other model commands in the order planModelQueries drew.  The counts
+	     * the logic cases shift down as they go are kept for the replays. */
+	    ArrayList<String> queries = null;
+	    int nextQuery = 0;
+	    int numWrites0 = numWrites, numReads0 = numReads, numExtBool0 = numExtBool;
+	    int numWritesArray10 = numWritesArray1, numReadsArray10 = numReadsArray1;
+	    int numWritesArray20 = numWritesArray2, numReadsArray20 = numReadsArray2;
+	    for (int pass = 0; ; pass++) {
+	      if (pass > 0) {
+	        if (queries == null) {
+	          if (produceModels)
+	            queries = planModelQueries (r,
+	              selectRandValRange (r, minNumModelTerms, maxNumModelTerms),
+	              selectRandValRange (r, minNumGetModels, maxNumGetModels));
+	          else
+	            queries = new ArrayList<String>();
+	        }
+	        while (nextQuery < queries.size() && queries.get (nextQuery) != null)
+	          output.println (queries.get (nextQuery++));
+	        if (nextQuery >= queries.size())
+	          break;
+	        nextQuery++;
+	        startReplay ();
+	        pars = 1;
+	        boolNodes = new ArrayList<SMTNode>();
+	        numWrites = numWrites0;
+	        numReads = numReads0;
+	        numExtBool = numExtBool0;
+	        numWritesArray1 = numWritesArray10;
+	        numReadsArray1 = numReadsArray10;
+	        numWritesArray2 = numWritesArray20;
+	        numReadsArray2 = numReadsArray20;
+	      }
 	    switch (logic) {
 	      case QF_BV:
 	      case QF_UFBV:{
@@ -6032,10 +6452,11 @@ public class FuzzSMT {
 	      case QF_A: 
 	      case QF_AX: {
 	        int numWritesH, numReadsH;
-	        SMTType indexType = new UType ("Index");
-	        SMTType elementType = new UType ("Element");
-	        SMTType arrayType = new ArrayTypeFromTo(indexType,elementType);
-	        if (!smtlib1)
+	        SMTType indexType = internType (new UType ("Index"));
+	        SMTType elementType = internType (new UType ("Element"));
+	        SMTType arrayType =
+	          internType (new ArrayTypeFromTo (indexType, elementType));
+	        if (!smtlib1 && !replaying)
 	        {
 	        	output.println("(declare-sort Index 0)");
 	        	output.println("(declare-sort Element 0)");
@@ -6103,7 +6524,8 @@ public class FuzzSMT {
 	        ArrayList<UPred> uPredsArray = new ArrayList<UPred>();
 	
 	        
-	        SMTType arrayType = new ArrayTypeFromTo(IntType.intType, IntType.intType);
+	        SMTType arrayType =
+	          internType (new ArrayTypeFromTo (IntType.intType, IntType.intType));
 	        sortsInt.add (IntType.intType);
 	        sortsArray.add (arrayType);
 	
@@ -6553,28 +6975,40 @@ public class FuzzSMT {
 	    }
 	    assert (boolNodes.size() == 1);
 	    assert (boolNodes.get(0).getType() == BoolType.boolType);
-	    if (bvDivMode == BVDivMode.GUARD &&
-	        (logic == SMTLogic.QF_ABV || logic == SMTLogic.QF_BV || logic == SMTLogic.QF_AUFBV ||
-	         logic == SMTLogic.QF_BVFP || logic == SMTLogic.QF_BVFPLRA ||
-	         logic == SMTLogic.QF_ABVFP || logic == SMTLogic.QF_ABVFPLRA ||
-	         logic == SMTLogic.QF_AUFBVFP)){
-	      assert (BVDivGuards != null);
-	      pars += addBVDivGuards (boolNodes, BVDivGuards);
-	      assert (boolNodes.size() == 1);
-	      assert (boolNodes.get(0).getType() == BoolType.boolType);
+	    if (!replaying) {
+	      if (bvDivMode == BVDivMode.GUARD &&
+	          (logic == SMTLogic.QF_ABV || logic == SMTLogic.QF_BV || logic == SMTLogic.QF_AUFBV ||
+	           logic == SMTLogic.QF_BVFP || logic == SMTLogic.QF_BVFPLRA ||
+	           logic == SMTLogic.QF_ABVFP || logic == SMTLogic.QF_ABVFPLRA ||
+	           logic == SMTLogic.QF_AUFBVFP)){
+	        assert (BVDivGuards != null);
+	        pars += addBVDivGuards (boolNodes, BVDivGuards);
+	        assert (boolNodes.size() == 1);
+	        assert (boolNodes.get(0).getType() == BoolType.boolType);
+	      }
+	      output.println (boolNodes.get(0).getName());
+	      builder = new StringBuilder (pars);
+	      for (int i = 0; i < pars; i++)
+	        builder.append (")");
+	      builder.append ("\n");
+	      output.print(builder.toString());
+	      if (smtlib1)
+	        output.println("");
+	      else
+	        output.println("(check-sat)");
+	    } else {
+	      /* the term asked for, then the lets close as for the formula and one
+	       * more paren closes the get-value */
+	      output.println (selectQueryTerm (r).getName());
+	      builder = new StringBuilder (pars + 2);
+	      for (int i = 0; i <= pars; i++)
+	        builder.append (")");
+	      builder.append ("\n");
+	      output.print (builder.toString());
 	    }
-	    output.println (boolNodes.get(0).getName());
-	   
-	    builder = new StringBuilder (pars);
-	    for (int i = 0; i < pars; i++)
-	      builder.append (")");
-	    builder.append ("\n");
-	    output.print(builder.toString());
-	    if (smtlib1)
-	    	output.println("");
-	    else
-	    	output.println("(check-sat)");
-	 
+	    } /* pass */
+	    replaying = false;
+	    SMTNode.recorded = null;
     }
     output.close();
     System.exit (0);
