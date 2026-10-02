@@ -48,6 +48,8 @@ public class FuzzSMT {
 	 * declaring functions print nothing and hand back the symbols declared
 	 * the first time round, in order, from these lists. */
 	static boolean replaying = false;
+	static boolean replayingAssert = false; // a replay asserts a fresh formula (-incremental) rather than asking for a term (-models).
+	static boolean incremental = false; // if true, follow the formula with rounds of push, pop, assert and check-sat.
 	static int declaredConstCursor = 0;
 	static ArrayList<SMTType> declaredSorts = new ArrayList<SMTType>();
 	static int declaredSortCursor = 0;
@@ -484,6 +486,88 @@ public class FuzzSMT {
       queries.add (null);
     Collections.shuffle (queries, r);
     return queries;
+  }
+
+  /* One command of the script that follows the formula and its check-sat:
+   * the text of the command, or for text == null a run of the layers over
+   * the declared constants -- an assert of a fresh formula when
+   * assertFormula is set, else a get-value of a built term. */
+  private static class Step {
+    final String text;
+    final boolean assertFormula;
+
+    Step (String text, boolean assertFormula){
+      this.text = text;
+      this.assertFormula = assertFormula;
+    }
+  }
+
+  private static void addModelQueries (Random r, List<Step> script,
+                                       int minTerms, int maxTerms,
+                                       int minGetModels, int maxGetModels){
+    ArrayList<String> queries;
+
+    assert (r != null);
+    assert (script != null);
+
+    queries = planModelQueries (r,
+                selectRandValRange (r, minTerms, maxTerms),
+                selectRandValRange (r, minGetModels, maxGetModels));
+    for (int i = 0; i < queries.size(); i++)
+      script.add (new Step (queries.get(i), false));
+  }
+
+  /* The script after the formula's check-sat.  With -models the model
+   * queries come first.  With -incremental a number of further check-sats
+   * drawn from minChecks..maxChecks follow, each preceded by one to three
+   * of: push of one or two levels, pop of a random number of the pushed
+   * levels, and assert of a fresh formula built by the layers; with -models
+   * each of these check-sats is followed by its own model queries.  The
+   * initial formula is asserted before any push, so it stays in force
+   * throughout, and the stack is left as it stands at the end. */
+  private static ArrayList<Step> planScript (Random r, int minTerms,
+                                             int maxTerms, int minGetModels,
+                                             int maxGetModels, int minChecks,
+                                             int maxChecks){
+    ArrayList<Step> script = new ArrayList<Step>();
+    int numChecks, numOps, depth, k;
+
+    assert (r != null);
+    assert (!smtlib1);
+
+    if (produceModels)
+      addModelQueries (r, script, minTerms, maxTerms, minGetModels,
+                       maxGetModels);
+    if (!incremental)
+      return script;
+
+    numChecks = selectRandValRange (r, minChecks, maxChecks);
+    depth = 0;
+    for (int i = 0; i < numChecks; i++) {
+      numOps = selectRandValRange (r, 1, 3);
+      for (int j = 0; j < numOps; j++) {
+        switch (r.nextInt (depth > 0 ? 3 : 2)) {
+          case 0:
+            script.add (new Step (null, true));
+            break;
+          case 1:
+            k = 1 + r.nextInt (2);
+            script.add (new Step ("(push " + k + ")", false));
+            depth += k;
+            break;
+          default:
+            k = 1 + r.nextInt (depth);
+            script.add (new Step ("(pop " + k + ")", false));
+            depth -= k;
+            break;
+        }
+      }
+      script.add (new Step ("(check-sat)", false));
+      if (produceModels)
+        addModelQueries (r, script, minTerms, maxTerms, minGetModels,
+                         maxGetModels);
+    }
+    return script;
   }
 
   /* The term a replayed get-value asks for: any term built in the replay,
@@ -4694,7 +4778,7 @@ public class FuzzSMT {
   private static String startFormula()
   {
 	  if (replaying)
-		  return "(get-value (";
+		  return replayingAssert ? "(assert" : "(get-value (";
 	  if (smtlib1)
 		  return ":formula";
 	  else
@@ -4750,8 +4834,14 @@ public class FuzzSMT {
 "  -bulk-export <num>   create <num> instances in the current directory\n"+
 "\n" +
 "  -bulk-prefix <string> prepend the string prefix to the file names created\n"+
-"  -models              set :produce-models and follow check-sat with model\n" +
-"                       commands in random order: get-value over the\n" +
+"  -incremental         follow the formula's check-sat with further rounds\n" +
+"                       of push, pop and assert of a fresh formula over the\n" +
+"                       same constants, each ending in check-sat; SMT-LIB 2\n" +
+"                       only (yices needs --incremental to accept it)\n" +
+"  -mcs <num>           use min <num> further check-sats      (default  1)\n" +
+"  -Mcs <num>           use max <num> further check-sats      (default  3)\n" +
+"  -models              set :produce-models and follow each check-sat with\n" +
+"                       model commands in random order: get-value over the\n" +
 "                       declared constants, get-value of terms built like\n" +
 "                       the formula from its operators, and get-model;\n" +
 "                       SMT-LIB 2 only.  The status is unknown, so expect\n" +
@@ -5074,6 +5164,8 @@ public class FuzzSMT {
     int maxNumModelTerms = 3;
     int minNumGetModels = 0;
     int maxNumGetModels = 2;
+    int minNumChecks = 1;
+    int maxNumChecks = 3;
     int minRefs = 1;
     int minNumConsts = 1;
     int maxNumConsts = 1;
@@ -5744,6 +5836,12 @@ public class FuzzSMT {
           minNumGetModels = parseIntOption (args, i++, 0, "invalid minimum number of get-model commands");
         } else if (arg.equals("-Mgm")) {
           maxNumGetModels = parseIntOption (args, i++, 0, "invalid maximum number of get-model commands");
+        } else if (arg.equals("-incremental")) {
+        	incremental = true;
+        } else if (arg.equals("-mcs")) {
+          minNumChecks = parseIntOption (args, i++, 0, "invalid minimum number of further check-sats");
+        } else if (arg.equals("-Mcs")) {
+          maxNumChecks = parseIntOption (args, i++, 0, "invalid maximum number of further check-sats");
         } else if (arg.equals("-bulk-export")) {
         	bulkExport = parseIntOption (args, i++, 1, "invalid bulk export amount");
         } else if (arg.equals("-bulk-prefix")) {
@@ -5771,6 +5869,11 @@ public class FuzzSMT {
       printErrAndExit ("-models cannot be combined with -smtlib1");
     checkMinMax (minNumModelTerms, maxNumModelTerms, "get-value terms");
     checkMinMax (minNumGetModels, maxNumGetModels, "get-model commands");
+
+    /* SMT-LIB 1 has no push, pop or second check-sat either */
+    if (smtlib1 && incremental)
+      printErrAndExit ("-incremental cannot be combined with -smtlib1");
+    checkMinMax (minNumChecks, maxNumChecks, "further check-sats");
 
     if (r == null) /* seed has not been set */
 	      r = new Random();
@@ -6221,31 +6324,32 @@ public class FuzzSMT {
 			output.println("(set-info :status unknown)");
 	    }
 
-	    /* -models: after the formula and its check-sat the layers run again,
-	     * once per get-value term, each run inside a get-value in place of the
-	     * assert and over the constants already declared, interleaved with the
-	     * other model commands in the order planModelQueries drew.  The counts
+	    /* -models and -incremental: after the formula and its check-sat the
+	     * script planScript draws is played out.  Its commands with text are
+	     * printed as they are; for the others the layers run again, over the
+	     * constants already declared, inside a get-value in place of the
+	     * assert (-models) or inside a fresh assert (-incremental).  The counts
 	     * the logic cases shift down as they go are kept for the replays. */
-	    ArrayList<String> queries = null;
-	    int nextQuery = 0;
+	    ArrayList<Step> script = null;
+	    int nextStep = 0;
 	    int numWrites0 = numWrites, numReads0 = numReads, numExtBool0 = numExtBool;
 	    int numWritesArray10 = numWritesArray1, numReadsArray10 = numReadsArray1;
 	    int numWritesArray20 = numWritesArray2, numReadsArray20 = numReadsArray2;
 	    for (int pass = 0; ; pass++) {
 	      if (pass > 0) {
-	        if (queries == null) {
-	          if (produceModels)
-	            queries = planModelQueries (r,
-	              selectRandValRange (r, minNumModelTerms, maxNumModelTerms),
-	              selectRandValRange (r, minNumGetModels, maxNumGetModels));
+	        if (script == null) {
+	          if (produceModels || incremental)
+	            script = planScript (r, minNumModelTerms, maxNumModelTerms,
+	                                 minNumGetModels, maxNumGetModels,
+	                                 minNumChecks, maxNumChecks);
 	          else
-	            queries = new ArrayList<String>();
+	            script = new ArrayList<Step>();
 	        }
-	        while (nextQuery < queries.size() && queries.get (nextQuery) != null)
-	          output.println (queries.get (nextQuery++));
-	        if (nextQuery >= queries.size())
+	        while (nextStep < script.size() && script.get (nextStep).text != null)
+	          output.println (script.get (nextStep++).text);
+	        if (nextStep >= script.size())
 	          break;
-	        nextQuery++;
+	        replayingAssert = script.get (nextStep++).assertFormula;
 	        startReplay ();
 	        pars = 1;
 	        boolNodes = new ArrayList<SMTNode>();
@@ -6975,7 +7079,7 @@ public class FuzzSMT {
 	    }
 	    assert (boolNodes.size() == 1);
 	    assert (boolNodes.get(0).getType() == BoolType.boolType);
-	    if (!replaying) {
+	    if (!replaying || replayingAssert) {
 	      if (bvDivMode == BVDivMode.GUARD &&
 	          (logic == SMTLogic.QF_ABV || logic == SMTLogic.QF_BV || logic == SMTLogic.QF_AUFBV ||
 	           logic == SMTLogic.QF_BVFP || logic == SMTLogic.QF_BVFPLRA ||
@@ -6992,7 +7096,9 @@ public class FuzzSMT {
 	        builder.append (")");
 	      builder.append ("\n");
 	      output.print(builder.toString());
-	      if (smtlib1)
+	      if (replaying)
+	        ; /* the script says when the next check-sat comes */
+	      else if (smtlib1)
 	        output.println("");
 	      else
 	        output.println("(check-sat)");
@@ -7008,6 +7114,7 @@ public class FuzzSMT {
 	    }
 	    } /* pass */
 	    replaying = false;
+	    replayingAssert = false;
 	    SMTNode.recorded = null;
     }
     output.close();
