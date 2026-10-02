@@ -33,6 +33,14 @@ public class ArrayTypeFromTo extends ArrayType {
 	  
   }
 
+  public SMTType getIndexType () {
+	  return this.from;
+  }
+
+  public SMTType getElementType () {
+	  return this.to;
+  }
+
   public String toString(boolean smtlib1) {
 	  if (smtlib1)
 		  return "Array";
