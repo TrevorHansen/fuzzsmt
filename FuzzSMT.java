@@ -3193,9 +3193,14 @@ public class FuzzSMT {
     assert (!nodes.isEmpty());
     assert (minRefs > 0);
     assert (!smtlib1);
-    assert (SMTNodeKind.FP_ABS.ordinal() < SMTNodeKind.FP_MAX.ordinal());
+    assert (SMTNodeKind.FP_ABS.ordinal() < SMTNodeKind.FP_FMA.ordinal());
 
-    kindSet = EnumSet.range (SMTNodeKind.FP_ABS, SMTNodeKind.FP_MAX);
+    /* FP_FMA is the end of the range, not FP_MAX: it is declared after FP_MAX,
+     * so a range ending at FP_MAX silently excluded it and fp.fma was never
+     * generated at all -- which also made the kindSet.remove(FP_FMA) below a
+     * no-op, and left --fp-wide-ops advertising an operator it could not
+     * produce. */
+    kindSet = EnumSet.range (SMTNodeKind.FP_ABS, SMTNodeKind.FP_FMA);
     kindSet.add (SMTNodeKind.ITE);
     kinds = kindSet.toArray (new SMTNodeKind[0]);
 

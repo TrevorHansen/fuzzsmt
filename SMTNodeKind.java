@@ -115,9 +115,10 @@ public enum SMTNodeKind {
    * argument of fp.add, fp.sub, fp.mul, fp.div, fp.fma, fp.sqrt and
    * fp.roundToIntegral; FuzzSMT.fpNeedsRoundingMode identifies those.
    *
-   * FP_ABS..FP_MAX are the term operators and must stay contiguous: the
+   * FP_ABS..FP_FMA are the term operators and must stay contiguous: the
    * floating point term layer selects them via
-   * EnumSet.range(FP_ABS, FP_MAX). */
+   * EnumSet.range(FP_ABS, FP_FMA).  FP_FMA is last of them and is the end of
+   * the range, so a term operator added later belongs before it. */
   FP_ABS("fp.abs", 1),
   FP_NEG("fp.neg", 1),
   FP_SQRT("fp.sqrt", 1),
